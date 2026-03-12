@@ -6,14 +6,10 @@ defmodule DailyRag.Segmenter do
 
   @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
   def segment_ads(brand_name, vertical, ads) do
-    ads
-    |> Enum.chunk_every(10)
-    |> Enum.reduce_while({:ok, []}, fn batch, {:ok, acc} ->
-      case call_claude(brand_name, vertical, batch) do
-        {:ok, segments} -> {:cont, {:ok, acc ++ segments}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    # Send all ads for a brand in a single claude call — one subprocess per brand.
+    # Batching (chunk_every) was causing 3+ subprocess launches per brand, each with
+    # ~60s startup overhead. One call per brand keeps total runtime within SLA.
+    call_claude(brand_name, vertical, ads)
   end
 
   defp call_claude(brand_name, vertical, ads_batch) do
@@ -24,10 +20,14 @@ defmodule DailyRag.Segmenter do
   defp do_call(_prompt, 0, _delay), do: {:error, :max_retries}
 
   defp do_call(prompt, attempts, delay) do
-    # Uses the claude CLI with OAuth subscription — no API key required
-    case System.cmd(@claude_bin, ["--print", "--model", @model, prompt],
-           stderr_to_stdout: false
-         ) do
+    # Uses the claude CLI with OAuth subscription — no API key required.
+    # Wrapped in Task for 10-min timeout (large brand sets with many ads).
+    task = Task.async(fn ->
+      System.cmd(@claude_bin, ["--print", "--model", @model, prompt],
+        stderr_to_stdout: false
+      )
+    end)
+    case Task.await(task, 600_000) do
       {output, 0} ->
         parse_segments(String.trim(output))
 
