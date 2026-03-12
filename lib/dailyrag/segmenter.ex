@@ -5,7 +5,8 @@ defmodule DailyRag.Segmenter do
   @default_claude_bin "/opt/homebrew/bin/claude"
 
   # Max new ads to segment per brand per daily run.
-  # Keeps claude --print prompt size manageable (~2-3 min per call).
+  # 3 brands × 20 ads = up to 60 segments per daily pipeline run.
+  # Keeps claude --print prompt size manageable (~4-6 min per brand call).
   # Remaining ads are picked up next time this brand cycles through.
   @max_ads_per_run 20
 

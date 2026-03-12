@@ -1,7 +1,8 @@
 defmodule DailyRag.Rotation do
   @moduledoc """
   Tracks which brands to segment today.
-  Cycles through all active brands sequentially in fixed-size batches.
+  Cycles through all active brands sequentially in fixed-size batches of 3 per day.
+  Each brand processes up to 20 new ads per run (see Segmenter.max_ads_per_run/0).
   State stored in data/brand_rotation.json.
   """
 
