@@ -22,11 +22,12 @@ defmodule DailyRag.Scraper do
 
       true ->
         args = if is_list(arg), do: arg, else: [arg]
-        case System.cmd(python, [script | args],
-               stderr_to_stdout: true,
-               env: [{"PYTHONDONTWRITEBYTECODE", "1"}],
-               timeout: 120_000
-             ) do
+        task = Task.async(fn ->
+          System.cmd(python, [script | args],
+            env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
+          )
+        end)
+        case Task.await(task, 120_000) do
           {output, 0} ->
             case Jason.decode(output) do
               {:ok, ads} when is_list(ads) ->

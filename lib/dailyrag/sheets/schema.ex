@@ -86,9 +86,9 @@ defmodule DailyRag.Sheets.Schema do
       brand_name: Enum.at(row, 0, ""),
       vertical: Enum.at(row, 1, ""),
       meta_library_url: Enum.at(row, 2, ""),
-      page_id: Enum.at(row, 3, ""),
-      status: Enum.at(row, 4, ""),
-      added_date: Enum.at(row, 5, "")
+      status: Enum.at(row, 3, ""),
+      added_date: Enum.at(row, 4, ""),
+      source: Enum.at(row, 5, "")
     }
   end
 
