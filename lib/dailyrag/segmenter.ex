@@ -7,7 +7,7 @@ defmodule DailyRag.Segmenter do
   # Max new ads to segment per brand per daily run.
   # Keeps claude --print prompt size manageable (~2-3 min per call).
   # Remaining ads are picked up next time this brand cycles through.
-  @max_ads_per_run 10
+  @max_ads_per_run 20
 
   @spec max_ads_per_run() :: pos_integer()
   def max_ads_per_run, do: @max_ads_per_run
