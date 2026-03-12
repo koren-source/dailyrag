@@ -4,12 +4,16 @@ defmodule DailyRag.Segmenter do
   @model "claude-sonnet-4-6"
   @claude_bin "/opt/homebrew/bin/claude"
 
+  # Max new ads to segment per brand per daily run.
+  # Keeps claude --print prompt size manageable (~2-3 min per call).
+  # Remaining ads are picked up next time this brand cycles through.
+  @max_ads_per_run 10
+
   @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
   def segment_ads(brand_name, vertical, ads) do
-    # Send all ads for a brand in a single claude call — one subprocess per brand.
-    # Batching (chunk_every) was causing 3+ subprocess launches per brand, each with
-    # ~60s startup overhead. One call per brand keeps total runtime within SLA.
-    call_claude(brand_name, vertical, ads)
+    ads
+    |> Enum.take(@max_ads_per_run)
+    |> then(&call_claude(brand_name, vertical, &1))
   end
 
   defp call_claude(brand_name, vertical, ads_batch) do

@@ -34,19 +34,32 @@ defmodule DailyRag.Pipeline.Daily do
 
   defp load_brands(sheet_id, opts) do
     with {:ok, rows} <- Client.read_range(sheet_id, "Brand_Config!A:F") do
-      brands =
+      all_active =
         rows
         |> Enum.drop(1)
         |> Enum.map(&Schema.parse_brand_config_row/1)
         |> Enum.filter(&(&1.status == "active"))
-        |> filter_brand(Map.get(opts, :brand))
 
+      brands = select_brands(all_active, opts)
       {:ok, brands}
     end
   end
 
-  defp filter_brand(brands, nil), do: brands
-  defp filter_brand(brands, brand_name), do: Enum.filter(brands, &(&1.brand_name == brand_name))
+  # --brand flag: run specific brand
+  defp select_brands(brands, %{brand: name}) when is_binary(name) and name != "" do
+    Enum.filter(brands, &(&1.brand_name == name))
+  end
+
+  # No flag: rotate — one brand per day
+  defp select_brands(brands, _opts) when length(brands) > 0 do
+    rotation = DailyRag.Rotation.load()
+    {brand, new_rotation} = DailyRag.Rotation.next_brand(brands, rotation)
+    DailyRag.Rotation.save!(new_rotation)
+    Logger.info("Brand rotation: running #{brand.brand_name} (index #{new_rotation["index"]} of #{length(brands)})")
+    [brand]
+  end
+
+  defp select_brands([], _opts), do: []
 
   defp apply_recovery(brands, %{recover: true}) do
     case Checkpoint.load() do
