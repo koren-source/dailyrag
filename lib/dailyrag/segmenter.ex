@@ -1,10 +1,8 @@
 defmodule DailyRag.Segmenter do
   require Logger
 
-  alias DailyRag.Util
-
-  @api_url "https://api.anthropic.com/v1/messages"
   @model "claude-sonnet-4-6"
+  @claude_bin "/opt/homebrew/bin/claude"
 
   @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
   def segment_ads(brand_name, vertical, ads) do
@@ -19,47 +17,27 @@ defmodule DailyRag.Segmenter do
   end
 
   defp call_claude(brand_name, vertical, ads_batch) do
-    body = %{
-      model: @model,
-      max_tokens: 4096,
-      system: system_prompt(),
-      messages: [%{role: "user", content: build_user_prompt(brand_name, vertical, ads_batch)}]
-    }
-
-    do_call(body, 3, 2_000)
+    prompt = system_prompt() <> "\n\n" <> build_user_prompt(brand_name, vertical, ads_batch)
+    do_call(prompt, 3, 2_000)
   end
 
-  defp do_call(_body, 0, _delay), do: {:error, :max_retries}
+  defp do_call(_prompt, 0, _delay), do: {:error, :max_retries}
 
-  defp do_call(body, attempts, delay) do
-    headers = [
-      {"x-api-key", Application.fetch_env!(:dailyrag, :anthropic_api_key)},
-      {"anthropic-version", "2023-06-01"},
-      {"content-type", "application/json"}
-    ]
-
-    req_module = Application.get_env(:dailyrag, :segmenter_http_client, Req)
-
-    case req_module.post(@api_url,
-           headers: headers,
-           json: body,
-           connect_options: Util.req_connect_options()
+  defp do_call(prompt, attempts, delay) do
+    # Uses the claude CLI with OAuth subscription — no API key required
+    case System.cmd(@claude_bin, ["--print", "--model", @model, prompt],
+           stderr_to_stdout: false
          ) do
-      {:ok, %Req.Response{status: 200, body: resp_body}} ->
-        text = get_in(resp_body, ["content", Access.at(0), "text"])
-        parse_segments(text)
+      {output, 0} ->
+        parse_segments(String.trim(output))
 
-      {:ok, %Req.Response{status: status, body: _resp_body}}
-      when status in [429, 500, 502, 503, 529] ->
-        Logger.warning("retrying Claude request after status #{status}")
+      {output, exit_code} when exit_code in [1, 2] ->
+        Logger.warning("claude CLI returned exit #{exit_code}, retrying. Output: #{String.slice(output, 0, 200)}")
         Process.sleep(delay)
-        do_call(body, attempts - 1, delay * 2)
+        do_call(prompt, attempts - 1, delay * 2)
 
-      {:ok, %Req.Response{status: status, body: resp_body}} ->
-        {:error, {:api_error, status, resp_body}}
-
-      {:error, reason} ->
-        {:error, reason}
+      {output, exit_code} ->
+        {:error, {:cli_error, exit_code, String.slice(output, 0, 500)}}
     end
   end
 
