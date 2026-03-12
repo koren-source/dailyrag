@@ -1,7 +1,7 @@
 defmodule DailyRag.Pipeline.Daily do
   require Logger
 
-  alias DailyRag.{Checkpoint, Decay, Dedup, Rotation, Scraper, SegmentationBacklog, Segmenter, Slack, Util}
+  alias DailyRag.{Decay, Dedup, Rotation, Scraper, SegmentationBacklog, Segmenter, Slack, Util}
   alias DailyRag.Sheets.{Client, Schema, TabInit}
 
   @spec run(map()) :: :ok | {:error, term()}
@@ -13,7 +13,7 @@ defmodule DailyRag.Pipeline.Daily do
 
     Util.ensure_data_dir!()
     TabInit.ensure_tabs!(sheet_id)
-    retry_pending_writes(sheet_id, dry_run, verbose)
+    # TODO: implement --recover with checkpoint logic
 
     with {:ok, active_brands} <- load_active_brands(sheet_id),
          :ok <- validate_brand_override(active_brands, opts),
@@ -44,7 +44,6 @@ defmodule DailyRag.Pipeline.Daily do
         Dedup.save!(dedup_index)
         Decay.save!(decay_cache)
         SegmentationBacklog.save!(backlog)
-        Checkpoint.clear!()
       end
 
       :ok
@@ -169,7 +168,7 @@ defmodule DailyRag.Pipeline.Daily do
       with {:ok, parsed_segments} <- Segmenter.segment_ads(brand.brand_name, brand.vertical, ads_to_segment) do
         rows =
           parsed_segments
-          |> enrich_segments(brand)
+          |> enrich_segments(brand, ads_to_segment)
           |> build_rows(sheet_id, brand.vertical)
 
         case maybe_append_rows(sheet_id, brand.vertical, rows) do
@@ -192,8 +191,12 @@ defmodule DailyRag.Pipeline.Daily do
     end)
   end
 
-  defp enrich_segments(segments, brand) do
+  defp enrich_segments(segments, brand, ads) do
+    ads_by_id = Map.new(ads, fn ad -> {to_string(ad["ad_id"]), ad} end)
+
     Enum.map(segments, fn segment ->
+      ad = Map.get(ads_by_id, to_string(segment["source_ad_id"]), %{})
+
       %{
         "segment_type" => segment["segment_type"],
         "vertical" => brand.vertical,
@@ -201,9 +204,9 @@ defmodule DailyRag.Pipeline.Daily do
         "principle" => segment["principle"],
         "transcript" => segment["transcript"],
         "why_it_works" => segment["why_it_works"],
-        "source_category" => "brand",
-        "confidence" => "emerging",
-        "brand_source_detail" => brand.brand_name,
+        "source_category" => "ad-library",
+        "confidence" => initial_confidence(ad["start_date"]),
+        "brand_source_detail" => "#{brand.brand_name} / Lib ID #{segment["source_ad_id"]}",
         "notes" => "",
         "date_discovered" => Util.today(),
         "last_seen" => Util.today(),
@@ -219,7 +222,7 @@ defmodule DailyRag.Pipeline.Daily do
 
     segments
     |> Enum.with_index(start_entry)
-    |> Enum.map(fn {segment, entry_number} -> Schema.build_daily_row(segment, entry_number) end)
+    |> Enum.map(fn {segment, entry_number} -> Schema.build_daily_row(segment, entry_number, vertical) end)
   end
 
   defp next_entry_number(sheet_id, tab) do
@@ -233,28 +236,14 @@ defmodule DailyRag.Pipeline.Daily do
 
   defp maybe_append_rows(sheet_id, vertical, rows) do
     tab = Schema.tab_for_vertical(vertical)
-
-    case Client.append_rows(sheet_id, "#{tab}!A:O", rows) do
-      :ok ->
-        :ok
-
-      {:error, reason} = error ->
-        Checkpoint.record_failed_write!(%{
-          "type" => "append",
-          "tab" => tab,
-          "range" => "#{tab}!A:O",
-          "rows" => rows,
-          "error" => inspect(reason)
-        })
-
-        error
-    end
+    Client.append_rows(sheet_id, "#{tab}!A:O", rows)
   end
 
   defp maybe_mark_inactive(_sheet_id, _vertical, []), do: :ok
 
   defp maybe_mark_inactive(sheet_id, vertical, disappeared_ids) do
     tab = Schema.tab_for_vertical(vertical)
+    yesterday = Date.utc_today() |> Date.add(-1) |> Date.to_iso8601()
 
     with {:ok, rows} <- Client.read_range(sheet_id, "#{tab}!A:O") do
       updates =
@@ -265,7 +254,7 @@ defmodule DailyRag.Pipeline.Daily do
           if Enum.at(row, 14, "") in disappeared_ids and Enum.at(row, 13, "") == "active" do
             [
               %{range: "#{tab}!N#{row_index}", values: [["inactive"]]},
-              %{range: "#{tab}!M#{row_index}", values: [[Util.today()]]}
+              %{range: "#{tab}!M#{row_index}", values: [[yesterday]]}
             ]
           else
             []
@@ -436,25 +425,20 @@ defmodule DailyRag.Pipeline.Daily do
   defp normalize_vertical("home-services"), do: "home-services"
   defp normalize_vertical(other), do: other
 
-  defp retry_pending_writes(_sheet_id, true, _verbose), do: :ok
+  defp initial_confidence(start_date_str) do
+    case Date.from_iso8601(start_date_str || "") do
+      {:ok, start_date} ->
+        age = Date.diff(Date.utc_today(), start_date)
 
-  defp retry_pending_writes(sheet_id, false, verbose) do
-    pending = Checkpoint.pending_writes()
-
-    if pending != [] do
-      log_verbose(%{verbose: verbose}, "Retrying #{length(pending)} pending writes")
-
-      Enum.each(pending, fn write ->
-        case write["type"] do
-          "append" -> Client.append_rows(sheet_id, write["range"], write["rows"])
-          _ -> :ok
+        cond do
+          age >= 30 -> "verified"
+          age >= 14 -> "curated"
+          true -> "emerging"
         end
-      end)
 
-      Checkpoint.clear_pending_writes!()
+      _ ->
+        "emerging"
     end
-
-    :ok
   end
 
   defp maybe_post_canary(cache, brand_name, ad_ids, false) do

@@ -87,9 +87,8 @@ defmodule DailyRag.Decay do
 
     cond do
       confidence == "verified" -> "verified"
-      age_days >= 30 -> "verified"
       confidence == "curated" and age_days >= 30 -> "verified"
-      age_days >= 14 and confidence in ["emerging", ""] -> "curated"
+      confidence in ["emerging", ""] and age_days >= 14 -> "curated"
       true -> confidence
     end
   end

@@ -2,7 +2,7 @@ defmodule DailyRag.Segmenter do
   require Logger
 
   @model "claude-sonnet-4-6"
-  @claude_bin "/opt/homebrew/bin/claude"
+  @default_claude_bin "/opt/homebrew/bin/claude"
 
   # Max new ads to segment per brand per daily run.
   # Keeps claude --print prompt size manageable (~2-3 min per call).
@@ -30,7 +30,7 @@ defmodule DailyRag.Segmenter do
     # Uses the claude CLI with OAuth subscription — no API key required.
     # Wrapped in Task for 10-min timeout (large brand sets with many ads).
     task = Task.async(fn ->
-      System.cmd(@claude_bin, ["--print", "--model", @model, prompt],
+      System.cmd(claude_bin(), ["--print", "--model", @model, prompt],
         stderr_to_stdout: false
       )
     end)
@@ -118,6 +118,10 @@ defmodule DailyRag.Segmenter do
   end
 
   defp parse_segments(_), do: {:error, :missing_text}
+
+  defp claude_bin do
+    Application.get_env(:dailyrag, :claude_bin, @default_claude_bin)
+  end
 
   defp validate_segment(seg) when is_map(seg) do
     %{

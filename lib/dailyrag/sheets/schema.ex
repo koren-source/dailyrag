@@ -67,10 +67,13 @@ defmodule DailyRag.Sheets.Schema do
     ]
   end
 
-  @spec build_daily_row(map(), integer()) :: [String.t()]
-  def build_daily_row(segment, entry_number) do
+  @spec build_daily_row(map(), integer(), String.t()) :: [String.t()]
+  def build_daily_row(segment, entry_number, vertical) do
+    prefix = if vertical == "dtc-supplements", do: "SD", else: "HD"
+    entry_str = "#{prefix}-#{String.pad_leading(Integer.to_string(entry_number), 4, "0")}"
+
     [
-      Integer.to_string(entry_number),
+      entry_str,
       string(segment, "segment_type"),
       string(segment, "vertical"),
       string(segment, "format"),

@@ -6,9 +6,9 @@ defmodule DailyRag.Sheets.SchemaTest do
   test "header lists have correct lengths" do
     assert length(Schema.daily_headers()) == 15
     assert length(Schema.brand_config_headers()) == 6
-    assert length(Schema.discovery_keywords_headers()) == 4
+    assert length(Schema.discovery_keywords_headers()) == 3
     assert length(Schema.discovery_queue_headers()) == 7
-    assert length(Schema.daily_report_headers()) == 8
+    assert length(Schema.daily_report_headers()) == 16
   end
 
   test "build_daily_row produces 15-element list" do
@@ -26,11 +26,12 @@ defmodule DailyRag.Sheets.SchemaTest do
           "last_seen" => "2026-03-12",
           "ad_id" => "123"
         },
-        1
+        1,
+        "dtc-supplements"
       )
 
     assert length(row) == 15
-    assert Enum.at(row, 0) == "1"
+    assert Enum.at(row, 0) == "SD-0001"
     assert Enum.at(row, 14) == "123"
   end
 
@@ -40,12 +41,13 @@ defmodule DailyRag.Sheets.SchemaTest do
         "AG1",
         "supplements",
         "https://example.com",
-        "12345",
         "active",
-        "2026-03-12"
+        "2026-03-12",
+        "manual"
       ])
 
     assert parsed.brand_name == "AG1"
-    assert parsed.page_id == "12345"
+    assert parsed.status == "active"
+    assert parsed.source == "manual"
   end
 end
