@@ -6,9 +6,10 @@ defmodule DailyRag.Segmenter do
 
   # Max new ads to segment per brand per daily run.
   # 3 brands × 20 ads = up to 60 segments per daily pipeline run.
-  # Keeps claude --print prompt size manageable (~4-6 min per brand call).
-  # Remaining ads are picked up next time this brand cycles through.
+  # Ads are processed in batches of @batch_size to stay within the 10-min
+  # Claude CLI timeout per call (~5-7 min per 10-ad batch).
   @max_ads_per_run 20
+  @batch_size 10
 
   @spec max_ads_per_run() :: pos_integer()
   def max_ads_per_run, do: @max_ads_per_run
@@ -17,7 +18,13 @@ defmodule DailyRag.Segmenter do
   def segment_ads(brand_name, vertical, ads) do
     ads
     |> Enum.take(@max_ads_per_run)
-    |> then(&call_claude(brand_name, vertical, &1))
+    |> Enum.chunk_every(@batch_size)
+    |> Enum.reduce_while({:ok, []}, fn batch, {:ok, acc} ->
+      case call_claude(brand_name, vertical, batch) do
+        {:ok, segments} -> {:cont, {:ok, acc ++ segments}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   defp call_claude(brand_name, vertical, ads_batch) do
