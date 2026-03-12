@@ -11,21 +11,26 @@ defmodule DailyRag.Slack do
 
   @spec daily_summary(map()) :: String.t()
   def daily_summary(stats) do
-    warnings =
+    errors =
       stats
-      |> Map.get(:warnings, [])
-      |> Enum.map(&"- #{&1}")
-      |> Enum.join("\n")
+      |> Map.get(:errors, [])
+      |> Enum.join(" | ")
 
     """
     DailyRag daily run complete for #{Map.get(stats, :date, DailyRag.Util.today())}
-    Brands processed: #{Map.get(stats, :brands_processed, 0)}
-    New ads found: #{Map.get(stats, :new_ads, 0)}
-    Ads decayed: #{Map.get(stats, :decayed, 0)}
-    Confidence upgrades: #{Map.get(stats, :upgrades, 0)}
-    Errors: #{Map.get(stats, :errors, 0)}
+    Brands scraped: #{Map.get(stats, :brands_scraped, 0)}
+    Brands segmented today: #{Map.get(stats, :brands_segmented, []) |> Enum.join(", ")}
+    Segmentation queue: #{Map.get(stats, :segmentation_queue, "")}
+    Total new ads: #{Map.get(stats, :total_new_ads, 0)}
+    Total segmented: #{Map.get(stats, :total_segmented, 0)}
+    Total decayed ads: #{Map.get(stats, :total_decayed_ads, 0)}
+    Supplements new/decayed: #{Map.get(stats, :supplements_new, 0)}/#{Map.get(stats, :supplements_decayed, 0)}
+    Home services new/decayed: #{Map.get(stats, :home_services_new, 0)}/#{Map.get(stats, :home_services_decayed, 0)}
+    Total active tracked: #{Map.get(stats, :total_active_tracked, 0)}
+    Total RAG entries: #{Map.get(stats, :total_rag_entries, 0)}
+    Confidence upgrades: #{Map.get(stats, :confidence_upgrades, 0)}
+    Errors: #{if errors == "", do: "0", else: errors}
     Duration (s): #{Map.get(stats, :duration_s, 0)}
-    #{if warnings == "", do: "", else: "Warnings:\n#{warnings}"}
     """
     |> String.trim()
   end

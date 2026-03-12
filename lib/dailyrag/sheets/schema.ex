@@ -24,12 +24,12 @@ defmodule DailyRag.Sheets.Schema do
 
   @spec brand_config_headers() :: [String.t()]
   def brand_config_headers do
-    ["brand_name", "vertical", "meta_library_url", "page_id", "status", "added_date"]
+    ["brand_name", "vertical", "meta_library_url", "status", "date_added", "source"]
   end
 
   @spec discovery_keywords_headers() :: [String.t()]
   def discovery_keywords_headers do
-    ["keyword", "vertical", "status", "last_searched"]
+    ["keyword", "vertical", "status"]
   end
 
   @spec discovery_queue_headers() :: [String.t()]
@@ -48,14 +48,22 @@ defmodule DailyRag.Sheets.Schema do
   @spec daily_report_headers() :: [String.t()]
   def daily_report_headers do
     [
-      "date",
-      "brands_processed",
-      "new_ads_found",
-      "ads_decayed",
-      "confidence_upgrades",
-      "errors",
-      "duration_seconds",
-      "notes"
+      "Date",
+      "Brands Scraped",
+      "Brands Segmented Today",
+      "Segmentation Queue",
+      "Total New Ads",
+      "Total Segmented",
+      "Total Decayed Ads",
+      "Supplements New",
+      "Home Services New",
+      "Supplements Decayed",
+      "Home Services Decayed",
+      "Brand Breakdown (New)",
+      "Brand Breakdown (Decayed)",
+      "Total Active Tracked",
+      "Total RAG Entries",
+      "Errors"
     ]
   end
 
@@ -87,14 +95,16 @@ defmodule DailyRag.Sheets.Schema do
       vertical: Enum.at(row, 1, ""),
       meta_library_url: Enum.at(row, 2, ""),
       status: Enum.at(row, 3, ""),
-      added_date: Enum.at(row, 4, ""),
+      date_added: Enum.at(row, 4, ""),
       source: Enum.at(row, 5, "")
     }
   end
 
   @spec tab_for_vertical(String.t()) :: String.t()
   def tab_for_vertical("supplements"), do: "Supplements_Daily"
+  def tab_for_vertical("dtc-supplements"), do: "Supplements_Daily"
   def tab_for_vertical("home_services"), do: "HomeServices_Daily"
+  def tab_for_vertical("home-services"), do: "HomeServices_Daily"
 
   def tab_for_vertical(vertical),
     do: raise(ArgumentError, "unsupported vertical #{inspect(vertical)}")

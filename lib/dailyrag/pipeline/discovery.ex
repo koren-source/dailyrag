@@ -16,7 +16,7 @@ defmodule DailyRag.Pipeline.Discovery do
     TabInit.ensure_tabs!(sheet_id)
 
     keywords =
-      read_rows(sheet_id, "Discovery_Keywords!A:D")
+      read_rows(sheet_id, "Discovery_Keywords!A:C")
       |> Enum.filter(&(Enum.at(&1, 2, "") == "active"))
 
     existing_brands =
@@ -103,9 +103,9 @@ defmodule DailyRag.Pipeline.Discovery do
             Enum.at(row, 0, ""),
             Enum.at(row, 1, ""),
             Enum.at(row, 2, ""),
-            Enum.at(row, 3, ""),
             "active",
-            Util.today()
+            Util.today(),
+            "discovery"
           ]
         end)
 

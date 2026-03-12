@@ -9,6 +9,9 @@ defmodule DailyRag.Segmenter do
   # Remaining ads are picked up next time this brand cycles through.
   @max_ads_per_run 10
 
+  @spec max_ads_per_run() :: pos_integer()
+  def max_ads_per_run, do: @max_ads_per_run
+
   @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
   def segment_ads(brand_name, vertical, ads) do
     ads

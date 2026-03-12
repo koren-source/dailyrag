@@ -19,6 +19,12 @@ import sys
 import time
 from datetime import datetime
 
+try:
+    from bs4 import BeautifulSoup
+    _BS4 = True
+except ImportError:
+    _BS4 = False
+
 logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
 
 
@@ -62,6 +68,30 @@ def extract_page_html(page):
     return str(page)
 
 
+def html_to_text(html_fragment):
+    """Convert an HTML fragment to clean plain text, stripping all tags and CSS noise."""
+    if _BS4:
+        soup = BeautifulSoup(html_fragment, "html.parser")
+        # Remove script/style blocks
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+        text = soup.get_text(separator=" ")
+    else:
+        # Fallback: strip tags with regex
+        text = re.sub(r"<[^>]+>", " ", html_fragment)
+
+    # Remove zero-width spaces and non-breaking spaces
+    text = text.replace("\u200b", " ").replace("\xa0", " ")
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    # Strip leading CSS class noise: sequences of short alphanumeric tokens before a real word
+    # Meta's HTML sometimes exposes class attribute values as text when sliced mid-attribute
+    text = re.sub(r'^(?:[a-z][a-z0-9_]{1,20}\s+){3,}', '', text).strip()
+    # Strip leading quote/angle remnants from mid-attribute slicing
+    text = re.sub(r'^[\'">\s]+', '', text).strip()
+    return text
+
+
 def extract_brand_ads(html):
     ads = []
     ad_ids = list(dict.fromkeys(re.findall(r"Library\s+ID[:\s]*(\d{8,20})", html, flags=re.I)))
@@ -81,10 +111,10 @@ def extract_brand_ads(html):
             if date_match:
                 start_date = parse_date_string(date_match.group(1))
 
-            clean = re.sub(r"<[^>]+>", " ", window)
-            clean = re.sub(r"\s+", " ", clean).strip()
-            parts = re.split(r"Library ID|Started running on", clean)
-            copy = max((part.strip() for part in parts), key=len, default="")
+            clean = html_to_text(window)
+            # Split on structural markers, pick the longest meaningful segment
+            parts = re.split(r"Library\s+ID|Started running on|Platforms?\s*\u200b", clean)
+            copy = max((p.strip() for p in parts if len(p.strip()) > 20), key=len, default="")
             copy = copy[:2000]
 
         ads.append({"ad_id": ad_id, "copy": copy, "start_date": start_date})
