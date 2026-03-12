@@ -3,3 +3,8 @@ data/
 _build/
 deps/
 *.beam
+priv/scraper/.venv/
+priv/scraper/__pycache__/
+tmp/
+.hex/
+priv/scraper/__pycache__/

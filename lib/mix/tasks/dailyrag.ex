@@ -1,23 +1,7 @@
 defmodule Mix.Tasks.Dailyrag do
-  @moduledoc """
-  Main entry point for the DailyRag pipeline.
-
-  ## Usage
-
-      mix dailyrag [options]
-
-  ## Options
-
-      --dry-run      Run full pipeline but don't write to Sheets or dedup index
-      --brand NAME   Run for a single brand only (exact match from Brand_Config)
-      --recover      Resume from last successful brand checkpoint
-      --discover     Run the weekly brand discovery workflow
-      --verbose      Extended logging to stdout
-  """
-
   use Mix.Task
 
-  @shortdoc "Run the DailyRag ad enrichment pipeline"
+  @shortdoc "Run the DailyRag enrichment pipeline"
 
   @switches [
     dry_run: :boolean,
@@ -29,21 +13,27 @@ defmodule Mix.Tasks.Dailyrag do
 
   @impl Mix.Task
   def run(args) do
-    # Start required applications
-    Mix.Task.run("app.start")
-
-    # Load .env
-    DailyRag.load_env()
-
-    # Parse CLI flags
-    {opts, _, _} = OptionParser.parse(args, switches: @switches)
-
-    opts = Enum.into(opts, %{})
-
-    if opts[:discover] do
-      DailyRag.Discovery.run(opts)
+    if Enum.any?(args, &(&1 in ["--help", "-h"])) do
+      Mix.shell().info("""
+      mix dailyrag [--dry-run] [--brand NAME] [--recover] [--discover] [--verbose]
+      """)
     else
-      DailyRag.Pipeline.run(opts)
+      {opts, _, _} = OptionParser.parse(args, switches: @switches)
+      Mix.Task.run("app.start")
+
+      opts_map = %{
+        dry_run: Keyword.get(opts, :dry_run, false),
+        brand: Keyword.get(opts, :brand),
+        recover: Keyword.get(opts, :recover, false),
+        discover: Keyword.get(opts, :discover, false),
+        verbose: Keyword.get(opts, :verbose, false)
+      }
+
+      if opts_map.discover do
+        DailyRag.Pipeline.Discovery.run(opts_map)
+      else
+        DailyRag.Pipeline.Daily.run(opts_map)
+      end
     end
   end
 end

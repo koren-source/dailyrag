@@ -1,17 +1,28 @@
 defmodule DailyRag do
-  @moduledoc """
-  DailyRag - Daily RAG enrichment pipeline for ad creative analysis.
-  Scrapes Meta Ad Library, segments ads with Claude, writes to Google Sheets.
-  """
+  @version "0.1.0"
+
+  def version, do: @version
 
   def load_env do
     env_path = Path.join(File.cwd!(), ".env")
 
     if File.exists?(env_path) do
       env_path
-      |> DotenvParser.parse_file()
-      |> Enum.each(fn {key, value} ->
-        System.put_env(key, value)
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.each(fn line ->
+        trimmed = String.trim(line)
+
+        cond do
+          trimmed == "" or String.starts_with?(trimmed, "#") ->
+            :ok
+
+          true ->
+            case String.split(trimmed, "=", parts: 2) do
+              [key, value] -> System.put_env(key, String.trim(value, ~s('")))
+              _ -> :ok
+            end
+        end
       end)
     end
   end

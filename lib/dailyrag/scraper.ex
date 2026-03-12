@@ -1,123 +1,49 @@
 defmodule DailyRag.Scraper do
-  @moduledoc """
-  Port wrapper for the Python Meta Ad Library scraper sidecar.
-  Calls priv/scraper/scrape_ads.py with a URL, returns parsed JSON ads.
-  """
+  defp script_path, do: Path.join(:code.priv_dir(:dailyrag), "scraper/scrape_ads.py")
 
-  require Logger
+  defp discovery_script_path,
+    do: Path.join(:code.priv_dir(:dailyrag), "scraper/scrape_discovery.py")
 
-  @timeout 180_000
+  @spec scrape_ads(String.t()) :: {:ok, [map()]} | {:error, String.t()}
+  def scrape_ads(url), do: run_python(script_path(), url)
 
-  def scrape(url) do
-    python = System.find_executable("python3") || "python3"
-    script = scraper_path()
+  @spec scrape_discovery(String.t()) :: {:ok, [map()]} | {:error, String.t()}
+  def scrape_discovery(keyword), do: run_python(discovery_script_path(), keyword)
 
-    unless File.exists?(script) do
-      {:error, "Scraper script not found at #{script}"}
-    else
-      run_scraper(python, script, url)
-    end
-  end
+  defp run_python(script, arg) do
+    python = Application.get_env(:dailyrag, :python_path, "python3")
 
-  defp scraper_path do
-    case :code.priv_dir(:dailyrag) do
-      {:error, _} ->
-        Path.join([File.cwd!(), "priv", "scraper", "scrape_ads.py"])
+    cond do
+      not File.exists?(script) ->
+        {:error, "scraper script not found: #{script}"}
 
-      dir ->
-        Path.join([to_string(dir), "scraper", "scrape_ads.py"])
-    end
-  end
+      System.find_executable(python) == nil ->
+        {:error, "python executable not found: #{python}"}
 
-  defp run_scraper(python, script, url) do
-    port =
-      Port.open({:spawn_executable, python}, [
-        :binary,
-        :exit_status,
-        :stderr_to_stdout,
-        args: [script, url]
-      ])
+      true ->
+        case System.cmd(python, [script, arg],
+               stderr_to_stdout: true,
+               env: [{"PYTHONDONTWRITEBYTECODE", "1"}],
+               timeout: 120_000
+             ) do
+          {output, 0} ->
+            case Jason.decode(output) do
+              {:ok, ads} when is_list(ads) ->
+                {:ok, ads}
 
-    collect_output(port, "")
-  end
+              {:ok, %{"error" => msg}} ->
+                {:error, msg}
 
-  defp collect_output(port, acc) do
-    receive do
-      {^port, {:data, data}} ->
-        collect_output(port, acc <> data)
-
-      {^port, {:exit_status, 0}} ->
-        parse_output(acc)
-
-      {^port, {:exit_status, code}} ->
-        Logger.error("Scraper exited with code #{code}: #{String.slice(acc, 0, 500)}")
-        {:error, "Scraper exited with code #{code}: #{String.slice(acc, 0, 500)}"}
-    after
-      @timeout ->
-        Port.close(port)
-        {:error, "Scraper timeout after #{div(@timeout, 1000)}s"}
-    end
-  end
-
-  defp parse_output(raw) do
-    # Strip any log lines before JSON — Scrapling may print INFO lines to stdout
-    raw = String.trim(raw)
-
-    # Find the start of the JSON array or object
-    json_start = find_json_start(raw)
-
-    case json_start do
-      nil ->
-        {:error, "No JSON found in scraper output: #{String.slice(raw, 0, 200)}"}
-
-      idx ->
-        json_str = String.slice(raw, idx, String.length(raw) - idx) |> String.trim()
-
-        cond do
-          String.starts_with?(json_str, "[") ->
-            case Jason.decode(json_str) do
-              {:ok, ads} when is_list(ads) -> {:ok, ads}
-              {:error, reason} -> {:error, "JSON parse error: #{inspect(reason)}"}
+              {:error, _} ->
+                {:error, "Invalid JSON from scraper: #{String.slice(output, 0, 200)}"}
             end
 
-          String.starts_with?(json_str, "{") ->
-            case Jason.decode(json_str) do
+          {output, _exit_code} ->
+            case Jason.decode(output) do
               {:ok, %{"error" => msg}} -> {:error, msg}
-              {:ok, _} -> {:error, "Unexpected JSON object from scraper"}
-              {:error, reason} -> {:error, "JSON parse error: #{inspect(reason)}"}
+              _ -> {:error, "Scraper crashed: #{String.slice(output, 0, 200)}"}
             end
-
-          true ->
-            {:error, "Unexpected scraper output: #{String.slice(json_str, 0, 200)}"}
         end
     end
-  end
-
-  defp find_json_start(raw) do
-    # Look for the first line that starts with [ or { (the actual JSON)
-    # Skip log lines like "[2026-03-12 12:30:00] INFO: ..."
-    raw
-    |> String.split("\n")
-    |> Enum.reduce_while(0, fn line, offset ->
-      trimmed = String.trim(line)
-
-      cond do
-        String.starts_with?(trimmed, "[{") or String.starts_with?(trimmed, "{\"") ->
-          {:halt, offset}
-
-        String.starts_with?(trimmed, "[") and String.contains?(trimmed, "\"ad_id\"") ->
-          {:halt, offset}
-
-        true ->
-          {:cont, offset + String.length(line) + 1}
-      end
-    end)
-    |> then(fn
-      offset when is_integer(offset) ->
-        if offset < String.length(raw), do: offset, else: nil
-
-      _ ->
-        nil
-    end)
   end
 end
