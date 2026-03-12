@@ -1,14 +1,14 @@
 defmodule DailyRag.Scraper do
   defp script_path, do: Path.join(:code.priv_dir(:dailyrag), "scraper/scrape_ads.py")
 
-  defp discovery_script_path,
-    do: Path.join(:code.priv_dir(:dailyrag), "scraper/scrape_discovery.py")
-
   @spec scrape_ads(String.t()) :: {:ok, [map()]} | {:error, String.t()}
-  def scrape_ads(url), do: run_python(script_path(), url)
+  def scrape_ads(url), do: run_python(script_path(), ["brand", url])
 
   @spec scrape_discovery(String.t()) :: {:ok, [map()]} | {:error, String.t()}
-  def scrape_discovery(keyword), do: run_python(discovery_script_path(), keyword)
+  def scrape_discovery(keyword) do
+    url = "https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=US&q=#{URI.encode(keyword)}"
+    run_python(script_path(), ["discovery", url])
+  end
 
   defp run_python(script, arg) do
     python = Application.get_env(:dailyrag, :python_path, "python3")
@@ -21,7 +21,8 @@ defmodule DailyRag.Scraper do
         {:error, "python executable not found: #{python}"}
 
       true ->
-        case System.cmd(python, [script, arg],
+        args = if is_list(arg), do: arg, else: [arg]
+        case System.cmd(python, [script | args],
                stderr_to_stdout: true,
                env: [{"PYTHONDONTWRITEBYTECODE", "1"}],
                timeout: 120_000
