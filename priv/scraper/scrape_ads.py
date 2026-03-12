@@ -98,17 +98,20 @@ def fetch_page(url, discovery=False):
     try:
         from scrapling import StealthyFetcher
 
+        # StealthyFetcher with network_idle=True waits for all JS/XHR to settle —
+        # no manual scrolling needed; the full rendered DOM is returned.
         page = StealthyFetcher.fetch(url, headless=True, network_idle=True)
-        if not discovery:
-            scroll_page(page)
-        return extract_page_html(page)
+        html = extract_page_html(page)
+        if html and len(html) > 1000:
+            return html
+        raise ValueError(f"StealthyFetcher returned suspiciously short HTML: {len(html)} chars")
     except Exception as exc:
         last_error = exc
 
     try:
-        from scrapling import PlayWrightFetcher
+        from scrapling import DynamicFetcher
 
-        page = PlayWrightFetcher.fetch(
+        page = DynamicFetcher.fetch(
             url,
             headless=True,
             page_action=async_scroll_page if not discovery else None,
