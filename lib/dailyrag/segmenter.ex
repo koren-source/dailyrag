@@ -6,10 +6,14 @@ defmodule DailyRag.Segmenter do
 
   # Max new ads to segment per brand per daily run.
   # 3 brands × 20 ads = up to 60 segments per daily pipeline run.
-  # Ads are processed in batches of @batch_size to stay within the 10-min
-  # Claude CLI timeout per call (~5-7 min per 10-ad batch).
+  # Ads are processed in batches of @batch_size to stay within the Claude CLI timeout.
+  # NOTE: Ad Library scrape output can contain lots of raw HTML/CSS noise; we sanitize +
+  # truncate per-ad text before sending to Claude to keep prompts fast + stable.
   @max_ads_per_run 20
-  @batch_size 10
+  @batch_size 5
+  @claude_timeout_ms 1_200_000
+  @max_chars_per_ad 1_500
+  @max_chars_headline 200
 
   @spec max_ads_per_run() :: pos_integer()
   def max_ads_per_run, do: @max_ads_per_run
@@ -32,22 +36,36 @@ defmodule DailyRag.Segmenter do
     do_call(prompt, 3, 2_000)
   end
 
+  defp normalize_text(text, max_len) when is_binary(text) do
+    text
+    |> String.replace(~r/<[^>]*>/, " ")
+    |> String.replace(~r/\s+/, " ")
+    |> String.replace(~r/\bActive\b/i, " ")
+    |> String.trim()
+    |> String.slice(0, max_len)
+  end
+
+  defp normalize_text(_, _max_len), do: ""
+
   defp do_call(_prompt, 0, _delay), do: {:error, :max_retries}
 
   defp do_call(prompt, attempts, delay) do
     # Uses the claude CLI with OAuth subscription — no API key required.
-    # Wrapped in Task for 10-min timeout (large brand sets with many ads).
-    task = Task.async(fn ->
-      System.cmd(claude_bin(), ["--print", "--model", @model, prompt],
-        stderr_to_stdout: false
-      )
-    end)
-    case Task.await(task, 600_000) do
+    # Wrapped in Task for a bounded timeout so we never hang the daily pipeline.
+    task =
+      Task.async(fn ->
+        System.cmd(claude_bin(), ["--print", "--model", @model, prompt], stderr_to_stdout: false)
+      end)
+
+    case Task.await(task, @claude_timeout_ms) do
       {output, 0} ->
         parse_segments(String.trim(output))
 
       {output, exit_code} when exit_code in [1, 2] ->
-        Logger.warning("claude CLI returned exit #{exit_code}, retrying. Output: #{String.slice(output, 0, 200)}")
+        Logger.warning(
+          "claude CLI returned exit #{exit_code}, retrying. Output: #{String.slice(output, 0, 200)}"
+        )
+
         Process.sleep(delay)
         do_call(prompt, attempts - 1, delay * 2)
 
@@ -90,8 +108,13 @@ defmodule DailyRag.Segmenter do
       ads_batch
       |> Enum.with_index(1)
       |> Enum.map(fn {ad, i} ->
-        headline = if ad["headline"] in [nil, ""], do: "", else: "\nHeadline: #{ad["headline"]}"
-        "--- Ad #{i} (ID: #{ad["ad_id"]}) ---\n#{ad["copy"]}#{headline}"
+        copy = normalize_text(ad["copy"], @max_chars_per_ad)
+        headline = normalize_text(ad["headline"], @max_chars_headline)
+
+        headline_line = if headline == "", do: "", else: "\nHeadline: #{headline}"
+        copy_text = if copy == "", do: "[no readable copy extracted]", else: copy
+
+        "--- Ad #{i} (ID: #{ad["ad_id"]}) ---\n#{copy_text}#{headline_line}"
       end)
       |> Enum.join("\n\n")
 
