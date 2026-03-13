@@ -26,10 +26,10 @@ defmodule DailyRag.SegmenterTest do
   end
 
   test "segment_ads parses validated response content" do
-    ads = [%{"ad_id" => "abc", "copy" => "Example copy", "headline" => "Headline"}]
+    ads = [%{"ad_id" => "abc", "copy" => "Example copy", "headline" => "Headline", "copy_source" => "transcript"}]
 
     assert {:ok, [segment]} = DailyRag.Segmenter.segment_ads("AG1", "supplements", ads)
-    assert segment["segment_type"] == "Problem-Solution"
+    assert segment["segment_type"] == "problem-solution"
     assert segment["source_ad_id"] == "abc"
   end
 end

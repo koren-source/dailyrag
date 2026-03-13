@@ -3,15 +3,10 @@ defmodule DailyRag.Segmenter do
 
   require Logger
 
-  alias DailyRag.Util
-
-  @anthropic_version "2023-06-01"
   @max_ads_per_run 20
-  @max_tokens 4_096
-  @temperature 0
-  @request_timeout_ms 30_000
   @retry_delays_ms [0, 2_000, 5_000, 10_000]
   @rate_limit_delay_ms 1_000
+  @claude_timeout_ms 120_000
 
   @approved_principles """
   Hook: curiosity-gap, pattern-interrupt, bold-claim, problem-callout, social-proof-open, contrarian, question, before-after, urgency, identity-callout
@@ -64,14 +59,12 @@ defmodule DailyRag.Segmenter do
     do: {:ok, [], false}
 
   defp segment_once(ad) do
-    payload = request_payload(ad)
+    prompt = build_prompt(ad)
 
-    case request_with_retries(payload) do
-      {:ok, body} ->
-        with {:ok, text} <- extract_response_text(body),
-             {:ok, segments} <- parse_segments(text, ad["ad_id"]) do
-          {:ok, segments, true}
-        else
+    case call_claude_with_retries(prompt) do
+      {:ok, text} ->
+        case parse_segments(text, ad["ad_id"]) do
+          {:ok, segments} -> {:ok, segments, true}
           {:error, reason} -> {:error, reason, true}
         end
 
@@ -80,75 +73,48 @@ defmodule DailyRag.Segmenter do
     end
   end
 
-  defp request_with_retries(payload) do
+  defp call_claude_with_retries(prompt) do
     Enum.reduce_while(@retry_delays_ms, {:error, :unknown}, fn delay_ms, _acc ->
       if delay_ms > 0, do: sleep_fun().(delay_ms)
 
-      case request_fun().(payload) do
-        {:ok, body} ->
-          {:halt, {:ok, body}}
+      case call_claude(prompt) do
+        {:ok, text} ->
+          {:halt, {:ok, text}}
 
         {:error, reason} ->
-          Logger.warning("anthropic request failed: #{inspect(reason)}")
+          Logger.warning("claude call failed: #{inspect(reason)}")
           {:cont, {:error, reason}}
       end
     end)
   end
 
-  defp default_request(payload) do
-    with {:ok, api_key} <- anthropic_api_key() do
+  defp call_claude(prompt) do
+    bin = claude_bin()
+    model = Application.get_env(:dailyrag, :anthropic_model, "claude-sonnet-4-6")
+
+    tmp =
+      Path.join(System.tmp_dir!(), "dr_prompt_#{:erlang.unique_integer([:positive])}.txt")
+
+    try do
+      File.write!(tmp, prompt)
+
       task =
         Task.async(fn ->
-          Req.post(api_url(),
-            headers: [
-              {"x-api-key", api_key},
-              {"anthropic-version", @anthropic_version},
-              {"content-type", "application/json"}
-            ],
-            json: payload,
-            connect_options: Util.req_connect_options(),
-            retry: false
+          System.cmd("sh", ["-c", ~s|"#{bin}" --print --model #{model} < "#{tmp}"|],
+            stderr_to_stdout: false
           )
         end)
 
-      case Task.yield(task, @request_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {:ok, %Req.Response{status: 200, body: body}}} ->
-          {:ok, body}
-
-        {:ok, {:ok, %Req.Response{status: status, body: body}}} ->
-          {:error, {:http_error, status, body}}
-
-        {:ok, {:error, reason}} ->
-          {:error, reason}
-
-        nil ->
-          {:error, :timeout}
+      case Task.yield(task, @claude_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {output, 0}} -> {:ok, String.trim(output)}
+        {:ok, {_output, code}} -> {:error, {:claude_exit, code}}
+        nil -> {:error, :claude_timeout}
       end
+    rescue
+      e -> {:error, {:claude_exception, Exception.message(e)}}
+    after
+      File.rm(tmp)
     end
-  end
-
-  defp extract_response_text(%{"content" => content}) when is_list(content) do
-    case Enum.find(content, &(Map.get(&1, "type") == "text")) do
-      %{"text" => text} when is_binary(text) and text != "" -> {:ok, text}
-      _ -> {:error, :missing_text_block}
-    end
-  end
-
-  defp extract_response_text(_body), do: {:error, :unexpected_response_shape}
-
-  defp request_payload(ad) do
-    %{
-      model: model(),
-      max_tokens: @max_tokens,
-      temperature: @temperature,
-      system: "You are a video ad segmentation expert for Cutbox.ai. Return only valid JSON arrays.",
-      messages: [
-        %{
-          role: "user",
-          content: build_prompt(ad)
-        }
-      ]
-    }
   end
 
   defp build_prompt(ad) do
@@ -262,21 +228,8 @@ defmodule DailyRag.Segmenter do
     }
   end
 
-  defp anthropic_api_key do
-    case Application.get_env(:dailyrag, :anthropic_api_key) do
-      api_key when is_binary(api_key) and api_key != "" -> {:ok, api_key}
-      _ -> {:error, :missing_anthropic_api_key}
-    end
-  end
-
-  defp model,
-    do: Application.get_env(:dailyrag, :anthropic_model, "claude-opus-4-0-20250514")
-
-  defp api_url,
-    do: Application.get_env(:dailyrag, :anthropic_api_url, "https://api.anthropic.com/v1/messages")
-
-  defp request_fun,
-    do: Application.get_env(:dailyrag, :anthropic_request_fun, &default_request/1)
+  defp claude_bin,
+    do: Application.get_env(:dailyrag, :claude_bin, "claude")
 
   defp sleep_fun,
     do: Application.get_env(:dailyrag, :segmenter_sleep_fun, &Process.sleep/1)
