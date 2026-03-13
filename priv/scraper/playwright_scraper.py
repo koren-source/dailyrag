@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from urllib.parse import quote_plus
 
 from playwright.async_api import BrowserContext, Page, TimeoutError, async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
 
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
@@ -248,7 +248,7 @@ def register_video_interceptor(page: Page, intercepted_video_urls: List[str]) ->
 
 async def open_results_page(context: BrowserContext, target_url: str) -> Page:
     page = await context.new_page()
-    await stealth_async(page)
+    # stealth applied via context manager in scrape_once
     intercepted_video_urls: List[str] = []
     register_video_interceptor(page, intercepted_video_urls)
     page._intercepted_video_urls = intercepted_video_urls  # type: ignore[attr-defined]
@@ -261,7 +261,7 @@ async def open_results_page(context: BrowserContext, target_url: str) -> Page:
 
 
 async def scrape_once(target_url: str, limit: int) -> List[Dict[str, str]]:
-    async with async_playwright() as playwright:
+    async with Stealth().use_async(async_playwright()) as playwright:
         browser = await playwright.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"],
