@@ -3,6 +3,10 @@ data/
 _build/
 deps/
 *.beam
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
 priv/scraper/.venv/
 priv/scraper/__pycache__/
 tmp/

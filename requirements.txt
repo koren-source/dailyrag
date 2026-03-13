@@ -1,0 +1,13 @@
+# Browser automation
+playwright
+playwright-stealth
+
+# Transcription
+openai-whisper
+
+# Google Sheets
+gspread
+google-auth
+
+# HTTP
+requests
