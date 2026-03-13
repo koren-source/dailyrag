@@ -30,7 +30,8 @@ env_file =
 env = Map.merge(env_file, System.get_env())
 
 config :dailyrag,
-  # Claude segmentation uses `claude` CLI (OAuth subscription) — no API key needed
+  anthropic_api_key: Map.get(env, "ANTHROPIC_API_KEY"),
+  anthropic_model: Map.get(env, "ANTHROPIC_MODEL", "claude-opus-4-0-20250514"),
   slack_bot_token: Map.get(env, "SLACK_BOT_TOKEN"),
   sheet_id: Map.get(env, "GOOGLE_SHEET_ID", "1nbVDvlICkkgzb-X678q6F2Y87ZiOV0B_xAobXtLsJd0"),
   slack_channel: Map.get(env, "SLACK_RAG_BUILDER_CHANNEL", "C0ALMSS92FK"),
