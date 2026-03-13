@@ -1,3 +1,5 @@
-scrapling
+# After install, run: playwright install chromium
 playwright
-beautifulsoup4
+playwright-stealth
+requests
+openai-whisper

@@ -1,10 +1,8 @@
 defmodule DailyRag.Sheets.Schema do
-  alias DailyRag.Util
-
   @spec daily_headers() :: [String.t()]
   def daily_headers do
     [
-      "Entry#",
+      "Entry #",
       "Segment Type",
       "Vertical",
       "Format",
@@ -13,18 +11,14 @@ defmodule DailyRag.Sheets.Schema do
       "Why It Works",
       "Source Category",
       "Confidence",
-      "Brand/Source Detail",
-      "Notes",
-      "date_discovered",
-      "last_seen",
-      "status",
-      "ad_id"
+      "Brand / Source Detail",
+      "Notes"
     ]
   end
 
   @spec brand_config_headers() :: [String.t()]
   def brand_config_headers do
-    ["brand_name", "vertical", "meta_library_url", "status", "date_added", "source"]
+    ["brand_name", "vertical", "search_query", "ad_library_url", "active"]
   end
 
   @spec discovery_keywords_headers() :: [String.t()]
@@ -48,58 +42,64 @@ defmodule DailyRag.Sheets.Schema do
   @spec daily_report_headers() :: [String.t()]
   def daily_report_headers do
     [
-      "Date",
-      "Brands Scraped",
-      "Brands Segmented Today",
-      "Segmentation Queue",
-      "Total New Ads",
-      "Total Segmented",
-      "Total Decayed Ads",
-      "Supplements New",
-      "Home Services New",
-      "Supplements Decayed",
-      "Home Services Decayed",
-      "Brand Breakdown (New)",
-      "Brand Breakdown (Decayed)",
-      "Total Active Tracked",
-      "Total RAG Entries",
-      "Errors"
+      "run_date",
+      "brands_scraped",
+      "new_ads_found",
+      "ads_transcribed",
+      "segments_written",
+      "errors",
+      "duration_seconds",
+      "status"
     ]
   end
 
-  @spec build_daily_row(map(), integer(), String.t()) :: [String.t()]
-  def build_daily_row(segment, entry_number, vertical) do
-    prefix = if vertical == "dtc-supplements", do: "SD", else: "HD"
-    entry_str = "#{prefix}-#{String.pad_leading(Integer.to_string(entry_number), 4, "0")}"
-
+  @spec build_daily_row(map(), integer()) :: [String.t()]
+  def build_daily_row(segment, entry_number) do
     [
-      entry_str,
+      Integer.to_string(entry_number),
       string(segment, "segment_type"),
       string(segment, "vertical"),
       string(segment, "format"),
       string(segment, "principle"),
       string(segment, "transcript"),
       string(segment, "why_it_works"),
-      string(segment, "source_category", "brand"),
-      string(segment, "confidence", "emerging"),
-      string(segment, "brand_source_detail", string(segment, "brand_name")),
-      string(segment, "notes"),
-      string(segment, "date_discovered", Util.today()),
-      string(segment, "last_seen", Util.today()),
-      string(segment, "status", "active"),
-      string(segment, "ad_id", string(segment, "source_ad_id"))
+      string(segment, "source_category", "ad-library"),
+      string(segment, "confidence", "curated"),
+      string(segment, "brand_source_detail"),
+      string(segment, "notes")
+    ]
+  end
+
+  @spec build_daily_report_row(map()) :: [String.t()]
+  def build_daily_report_row(report) do
+    [
+      string(report, "run_date"),
+      integer_string(report, "brands_scraped"),
+      integer_string(report, "new_ads_found"),
+      integer_string(report, "ads_transcribed"),
+      integer_string(report, "segments_written"),
+      string(report, "errors"),
+      integer_string(report, "duration_seconds"),
+      string(report, "status", "success")
     ]
   end
 
   @spec parse_brand_config_row([String.t()]) :: map()
   def parse_brand_config_row(row) do
+    brand_name = Enum.at(row, 0, "")
+    vertical = row |> Enum.at(1, "") |> normalize_vertical()
+    search_query = Enum.at(row, 2, "")
+    ad_library_url = Enum.at(row, 3, "")
+
     %{
-      brand_name: Enum.at(row, 0, ""),
-      vertical: Enum.at(row, 1, ""),
-      meta_library_url: Enum.at(row, 2, ""),
-      status: Enum.at(row, 3, ""),
-      date_added: Enum.at(row, 4, ""),
-      source: Enum.at(row, 5, "")
+      brand_name: brand_name,
+      name: brand_name,
+      vertical: vertical,
+      search_query: search_query,
+      ad_library_url: ad_library_url,
+      url: ad_library_url,
+      active: parse_boolean(Enum.at(row, 4, "")),
+      active_raw: Enum.at(row, 4, "")
     }
   end
 
@@ -111,6 +111,23 @@ defmodule DailyRag.Sheets.Schema do
 
   def tab_for_vertical(vertical),
     do: raise(ArgumentError, "unsupported vertical #{inspect(vertical)}")
+
+  defp parse_boolean(value) when value in [true, "TRUE", "true", "True", "1", 1, "yes", "YES"],
+    do: true
+
+  defp parse_boolean(_), do: false
+
+  defp normalize_vertical("supplements"), do: "dtc-supplements"
+  defp normalize_vertical("dtc-supplements"), do: "dtc-supplements"
+  defp normalize_vertical("home_services"), do: "home-services"
+  defp normalize_vertical("home-services"), do: "home-services"
+  defp normalize_vertical(other), do: other
+
+  defp integer_string(map, key) do
+    map
+    |> string(key, "0")
+    |> to_string()
+  end
 
   defp string(map, key, default \\ "") do
     Map.get(map, key) || Map.get(map, String.to_atom(key), default) || default
