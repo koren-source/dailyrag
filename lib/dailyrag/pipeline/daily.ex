@@ -6,7 +6,8 @@ defmodule DailyRag.Pipeline.Daily do
   alias DailyRag.{Decay, Dedup, Rotation, Scraper, Segmenter, Slack, Util}
   alias DailyRag.Sheets.DailyWriter
 
-  @pipeline_timeout_ms :timer.minutes(90)
+  @pipeline_timeout_ms :timer.minutes(180)
+  @brand_segment_timeout_ms :timer.minutes(8)
 
   @spec run() :: :ok | {:error, term()}
   def run, do: run(%{})
@@ -161,7 +162,7 @@ defmodule DailyRag.Pipeline.Daily do
   end
 
   defp select_segmentation_brands(brands, _opts) do
-    Rotation.next_brands(brands, Rotation.load(), 3)
+    Rotation.next_brands(brands, Rotation.load(), length(brands))
   end
 
   defp scrape_all_brands(brands, dedup_index, decay_cache, tracker, opts) do
@@ -215,40 +216,50 @@ defmodule DailyRag.Pipeline.Daily do
   defp process_rotating_brands(brands, new_ads_by_brand, tracker, opts) do
     Enum.reduce(brands, %{ads_transcribed: 0, segments_written: 0, errors: []}, fn brand, acc ->
       update_tracker(tracker, %{phase: "phase_2_segment", brand: brand.brand_name})
-      ads = Map.get(new_ads_by_brand, brand.brand_name, [])
-      transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
 
-      transcribed_count =
-        Enum.count(transcribed_ads, &(&1["copy_source"] == "whisper_transcript"))
+      task = Task.async(fn ->
+        ads = Map.get(new_ads_by_brand, brand.brand_name, [])
+        transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
+        transcribed_count = Enum.count(transcribed_ads, &(&1["copy_source"] == "whisper_transcript"))
+        {:ok, raw_segments} = Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads)
+        segments = enrich_segments(raw_segments, transcribed_ads, brand)
+        {transcribed_count, segments}
+      end)
 
-      {:ok, raw_segments} = Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads)
-      segments = enrich_segments(raw_segments, transcribed_ads, brand)
+      case Task.yield(task, @brand_segment_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, {transcribed_count, segments}} ->
+          case maybe_write_segments(segments, brand.vertical, opts) do
+            :ok ->
+              next_acc = %{
+                ads_transcribed: acc.ads_transcribed + transcribed_count,
+                segments_written: acc.segments_written + length(segments),
+                errors: acc.errors
+              }
 
-      case maybe_write_segments(segments, brand.vertical, opts) do
-        :ok ->
-          next_acc = %{
-            ads_transcribed: acc.ads_transcribed + transcribed_count,
-            segments_written: acc.segments_written + length(segments),
-            errors: acc.errors
-          }
+              update_tracker(tracker, %{
+                ads_transcribed: next_acc.ads_transcribed,
+                segments_written: next_acc.segments_written
+              })
 
-          update_tracker(tracker, %{
-            ads_transcribed: next_acc.ads_transcribed,
-            segments_written: next_acc.segments_written
-          })
+              next_acc
 
-          next_acc
+            {:error, reason} ->
+              error = "#{brand.brand_name}: #{inspect(reason)}"
+              Logger.warning("sheet write failed for #{brand.brand_name}: #{inspect(reason)}")
+              append_tracker_error(tracker, error)
 
-        {:error, reason} ->
-          error = "#{brand.brand_name}: #{inspect(reason)}"
-          Logger.warning("sheet write failed for #{brand.brand_name}: #{inspect(reason)}")
+              %{
+                ads_transcribed: acc.ads_transcribed + transcribed_count,
+                segments_written: acc.segments_written,
+                errors: acc.errors ++ [error]
+              }
+          end
+
+        nil ->
+          error = "#{brand.brand_name}: segmentation timed out after 8 minutes"
+          Logger.warning(error)
           append_tracker_error(tracker, error)
-
-          %{
-            ads_transcribed: acc.ads_transcribed + transcribed_count,
-            segments_written: acc.segments_written,
-            errors: acc.errors ++ [error]
-          }
+          %{acc | errors: acc.errors ++ [error]}
       end
     end)
   end
