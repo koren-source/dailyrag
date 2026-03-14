@@ -6,7 +6,7 @@ defmodule DailyRag.Sheets.DailyWriter do
 
   @spec read_brand_config(String.t()) :: {:ok, [map()]} | {:error, term()}
   def read_brand_config(sheet_id) do
-    with {:ok, rows} <- Client.read_range(sheet_id, "Brand_Config!A:E") do
+    with {:ok, rows} <- Client.read_range(sheet_id, "Brand_Config!A:F") do
       brands =
         rows
         |> Enum.drop(1)
