@@ -31,7 +31,7 @@ env = Map.merge(env_file, System.get_env())
 
 config :dailyrag,
   anthropic_api_key: Map.get(env, "ANTHROPIC_API_KEY"),
-  anthropic_model: Map.get(env, "ANTHROPIC_MODEL", "claude-opus-4-0-20250514"),
+  anthropic_model: Map.get(env, "ANTHROPIC_MODEL", "claude-sonnet-4-6"),
   slack_bot_token: Map.get(env, "SLACK_BOT_TOKEN"),
   sheet_id: Map.get(env, "GOOGLE_SHEET_ID", "1nbVDvlICkkgzb-X678q6F2Y87ZiOV0B_xAobXtLsJd0"),
   slack_channel: Map.get(env, "SLACK_RAG_BUILDER_CHANNEL", "C0ALMSS92FK"),
