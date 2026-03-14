@@ -38,7 +38,7 @@ defmodule DailyRag.Rotation do
     brands_by_vertical = Enum.group_by(brands, &vertical_key/1)
 
     supplements_count = Keyword.get(opts, :supplements_count, 2)
-    home_services_count = Keyword.get(opts, :home_services_count, 2)
+    home_services_count = Keyword.get(opts, :home_services_count, 3)
 
     vertical_configs = [
       {"dtc-supplements", supplements_count},

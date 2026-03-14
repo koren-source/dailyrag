@@ -63,7 +63,7 @@ defmodule DailyRag.Pipeline.Daily do
          :ok <- validate_brand_override(brands, opts),
          :ok <- health_check(),
          {brands_to_segment, rotation_state} <- select_segmentation_brands(brands, opts),
-         scrape_state <- scrape_all_brands(brands, Dedup.load(), Decay.load(), tracker, opts),
+         scrape_state <- scrape_all_brands(brands_to_segment, Dedup.load(), Decay.load(), tracker, opts),
          segment_state <- process_rotating_brands(brands_to_segment, scrape_state.new_ads_by_brand, tracker, opts) do
       duration_seconds = System.monotonic_time(:second) - started_at
 
