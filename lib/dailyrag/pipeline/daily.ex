@@ -162,7 +162,7 @@ defmodule DailyRag.Pipeline.Daily do
   end
 
   defp select_segmentation_brands(brands, _opts) do
-    Rotation.next_brands(brands, Rotation.load(), length(brands))
+    Rotation.next_rotating_brands(brands, Rotation.load())
   end
 
   defp scrape_all_brands(brands, dedup_index, decay_cache, tracker, opts) do

@@ -1,9 +1,8 @@
 defmodule DailyRag.Rotation do
   @moduledoc """
   Tracks which brands to segment today.
-  Cycles through all active brands sequentially in fixed-size batches of 3 per day.
-  Each brand processes up to 20 new ads per run (see Segmenter.max_ads_per_run/0).
-  State stored in data/brand_rotation.json.
+  Rotates 2 supplement brands + 2 home-services brands per day independently.
+  State stored in data/brand_rotation.json with per-vertical indices.
   """
 
   @rotation_path "data/brand_rotation.json"
@@ -26,6 +25,45 @@ defmodule DailyRag.Rotation do
     |> Jason.encode!(pretty: true)
     |> then(&DailyRag.Util.atomic_write!(@rotation_path, &1))
   end
+
+  @doc """
+  Select brands for segmentation across all verticals.
+  Returns {selected_brands, new_state} where selected_brands is a flat list
+  of 2 supplements + 2 home-services brands (or fewer if a vertical has < 2).
+  """
+  @spec next_rotating_brands([term()], map(), keyword()) :: {[term()], map()}
+  def next_rotating_brands(brands, state, opts \\ []) do
+    state = normalize_state(state)
+    today = Date.utc_today() |> Date.to_iso8601()
+    brands_by_vertical = Enum.group_by(brands, &vertical_key/1)
+
+    supplements_count = Keyword.get(opts, :supplements_count, 2)
+    home_services_count = Keyword.get(opts, :home_services_count, 2)
+
+    vertical_configs = [
+      {"dtc-supplements", supplements_count},
+      {"home-services", home_services_count}
+    ]
+
+    {all_selected, new_verticals} =
+      Enum.reduce(vertical_configs, {[], %{}}, fn {vertical, count}, {sel_acc, vert_acc} ->
+        pool = Map.get(brands_by_vertical, vertical, [])
+        vert_state = get_in(state, ["verticals", vertical]) || fresh_vertical()
+
+        {selected, new_vert_state} = pick_from_vertical(pool, vert_state, count, today)
+
+        {sel_acc ++ selected, Map.put(vert_acc, vertical, new_vert_state)}
+      end)
+
+    new_state = %{
+      "last_run" => today,
+      "verticals" => new_verticals
+    }
+
+    {all_selected, new_state}
+  end
+
+  # --- Legacy API kept for backward compatibility ---
 
   @spec next_brands([term()], map(), pos_integer()) :: {[term()], map()}
   def next_brands(brands, state, count \\ 3)
@@ -60,30 +98,90 @@ defmodule DailyRag.Rotation do
     end
   end
 
-  @spec next_brand([term()], map()) :: {term() | nil, map()}
-  def next_brand(brands, state) do
-    case next_brands(brands, state, 1) do
-      {[brand], next_state} -> {brand, next_state}
-      {[], next_state} -> {nil, next_state}
+  # --- Private helpers ---
+
+  defp pick_from_vertical([], vert_state, _count, _today), do: {[], vert_state}
+
+  defp pick_from_vertical(pool, vert_state, count, today) do
+    if vert_state["last_run"] == today and vert_state["last_brands"] != [] do
+      selected =
+        vert_state["last_brands"]
+        |> Enum.map(&find_brand(pool, &1))
+        |> Enum.reject(&is_nil/1)
+
+      {selected, vert_state}
+    else
+      total = length(pool)
+      pick = min(count, total)
+      start_index = rem(max(vert_state["index"], 0), total)
+
+      selected =
+        0..(pick - 1)
+        |> Enum.map(fn offset -> Enum.at(pool, rem(start_index + offset, total)) end)
+
+      new_vert_state = %{
+        "index" => rem(start_index + pick, total),
+        "last_run" => today,
+        "last_brands" => Enum.map(selected, &brand_name/1)
+      }
+
+      {selected, new_vert_state}
     end
   end
 
-  defp normalize_state(state) do
-    fresh()
-    |> Map.merge(state || %{})
-    |> Map.update!("index", fn
-      value when is_integer(value) -> value
-      _ -> 0
-    end)
-    |> Map.update!("last_brands", fn
-      value when is_list(value) -> value
-      _ -> []
+  defp normalize_state(state) when is_map(state) do
+    cond do
+      is_map(Map.get(state, "verticals")) ->
+        %{
+          "last_run" => Map.get(state, "last_run"),
+          "verticals" => normalize_verticals(Map.get(state, "verticals", %{})),
+          "index" => safe_int(Map.get(state, "index", 0)),
+          "last_brands" => safe_list(Map.get(state, "last_brands", []))
+        }
+
+      true ->
+        %{
+          "last_run" => Map.get(state, "last_run"),
+          "verticals" => %{},
+          "index" => safe_int(Map.get(state, "index", 0)),
+          "last_brands" => safe_list(Map.get(state, "last_brands", []))
+        }
+    end
+  end
+
+  defp normalize_state(_), do: fresh()
+
+  defp normalize_verticals(verticals) when is_map(verticals) do
+    Map.new(verticals, fn {k, v} ->
+      {k,
+       %{
+         "index" => safe_int(Map.get(v, "index", 0)),
+         "last_run" => Map.get(v, "last_run"),
+         "last_brands" => safe_list(Map.get(v, "last_brands", []))
+       }}
     end)
   end
 
-  defp find_brand(brands, brand_name), do: Enum.find(brands, &(brand_name(&1) == brand_name))
-  defp brand_name(%{brand_name: brand_name}), do: brand_name
-  defp brand_name(%{"brand_name" => brand_name}), do: brand_name
+  defp normalize_verticals(_), do: %{}
+
+  defp safe_int(v) when is_integer(v), do: v
+  defp safe_int(_), do: 0
+
+  defp safe_list(v) when is_list(v), do: v
+  defp safe_list(_), do: []
+
+  defp fresh_vertical, do: %{"index" => 0, "last_run" => nil, "last_brands" => []}
+
+  defp fresh do
+    %{"last_run" => nil, "verticals" => %{}, "index" => 0, "last_brands" => []}
+  end
+
+  defp vertical_key(%{vertical: v}), do: v
+  defp vertical_key(%{"vertical" => v}), do: v
+  defp vertical_key(_), do: "unknown"
+
+  defp find_brand(brands, name), do: Enum.find(brands, &(brand_name(&1) == name))
+  defp brand_name(%{brand_name: n}), do: n
+  defp brand_name(%{"brand_name" => n}), do: n
   defp brand_name(other), do: other
-  defp fresh, do: %{"index" => 0, "last_run" => nil, "last_brands" => []}
 end
