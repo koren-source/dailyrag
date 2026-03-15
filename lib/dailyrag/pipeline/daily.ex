@@ -185,6 +185,8 @@ defmodule DailyRag.Pipeline.Daily do
   end
 
   defp scrape_all_brands(brands, dedup_index, decay_cache, tracker, opts) do
+    Logger.info("Phase 1: scraping #{length(brands)} brands")
+
     brands
     |> Enum.with_index()
     |> Enum.reduce(initial_scrape_state(dedup_index, decay_cache), fn {brand, idx}, acc ->
@@ -229,6 +231,8 @@ defmodule DailyRag.Pipeline.Daily do
             new_ads_found: next_acc.new_ads_found
           })
 
+          Logger.info("[#{brand.brand_name}] scraped #{length(ads)} ads, #{length(new_ads)} new")
+
           next_acc
 
         {:error, :timeout} ->
@@ -267,6 +271,10 @@ defmodule DailyRag.Pipeline.Daily do
                 new_ads_found: next_acc.new_ads_found
               })
 
+              Logger.info(
+                "[#{brand.brand_name}] retry succeeded — scraped #{length(ads)} ads, #{length(new_ads)} new"
+              )
+
               next_acc
 
             {:error, retry_reason} ->
@@ -290,6 +298,8 @@ defmodule DailyRag.Pipeline.Daily do
   end
 
   defp process_rotating_brands(brands, new_ads_by_brand, tracker, opts) do
+    Logger.info("Phase 2: segmenting #{length(brands)} brands")
+
     Enum.reduce(brands, %{ads_transcribed: 0, segments_written: 0, errors: []}, fn brand, acc ->
       update_tracker(tracker, %{phase: "phase_2_segment", brand: brand.brand_name})
 
