@@ -41,8 +41,11 @@ defmodule DailyRag.Scraper do
           ]
 
           case run_json(transcriber_script_path(), args, @transcribe_timeout_ms) do
-            {:ok, %{} = response} -> {:ok, merge_transcription(ad, response)}
-            {:error, reason} -> {:ok, headline_fallback(Map.put(ad, "transcription_error", inspect(reason)))}
+            {:ok, %{} = response} ->
+              {:ok, merge_transcription(ad, response)}
+
+            {:error, reason} ->
+              {:ok, headline_fallback(Map.put(ad, "transcription_error", inspect(reason)))}
           end
       end
     end
@@ -83,7 +86,12 @@ defmodule DailyRag.Scraper do
   end
 
   @spec scrape_discovery(String.t()) :: {:ok, [map()]} | {:error, term()}
-  def scrape_discovery(_keyword), do: {:error, :discovery_not_supported}
+  def scrape_discovery(_keyword) do
+    case Application.get_env(:dailyrag, :discovery_scraper_mode, :stub) do
+      :stub -> {:ok, []}
+      _ -> {:error, :discovery_not_supported}
+    end
+  end
 
   defp build_scrape_args(brand, opts) do
     limit = brand |> get_value([:limit, "limit"], Keyword.get(opts, :limit, 30)) |> to_string()
@@ -94,7 +102,14 @@ defmodule DailyRag.Scraper do
 
       present?(
         query =
-          get_value(brand, [:search_query, :brand_name, :name, "search_query", "brand_name", "name"])
+            get_value(brand, [
+              :search_query,
+              :brand_name,
+              :name,
+              "search_query",
+              "brand_name",
+              "name"
+            ])
       ) ->
         {:ok, ["--brand", query, "--limit", limit]}
 
@@ -119,7 +134,8 @@ defmodule DailyRag.Scraper do
     error = get_value(response, ["error", :error], nil)
 
     cond do
-      is_binary(transcript) and String.trim(transcript) != "" and copy_source == "whisper_transcript" ->
+      is_binary(transcript) and String.trim(transcript) != "" and
+          copy_source == "whisper_transcript" ->
         ad
         |> Map.put("copy", transcript)
         |> Map.put("copy_source", "whisper_transcript")
@@ -165,9 +181,7 @@ defmodule DailyRag.Scraper do
       true ->
         task =
           Task.async(fn ->
-            System.cmd(python, [script_path | args],
-              env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
-            )
+            System.cmd(python, [script_path | args], env: [{"PYTHONDONTWRITEBYTECODE", "1"}])
           end)
 
         case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do

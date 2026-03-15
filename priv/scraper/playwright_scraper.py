@@ -210,6 +210,22 @@ async def parse_card(card, intercepted_video_urls: List[str]) -> Optional[Dict[s
             has_video = False
 
         headline = await extract_headline(card)
+        INTERSTITIAL_PHRASES = [
+            "select country",
+            "log in to facebook",
+            "log in",
+            "you must log in",
+            "create new account",
+            "sign up for facebook",
+            "cookie policy",
+            "we use cookies",
+        ]
+        headline_lower = headline.lower()
+        text_lower = text.lower()[:500]
+        if any(phrase in headline_lower or phrase in text_lower for phrase in INTERSTITIAL_PHRASES):
+            logging.warning(f"Skipping interstitial card: '{headline[:60]}'")
+            return None
+
         start_date = parse_started_date(combined)
         video_url = await extract_video_url(card, intercepted_video_urls) if has_video else ""
 
@@ -276,6 +292,17 @@ async def scrape_once(target_url: str, limit: int) -> List[Dict[str, str]]:
             )
 
             page = await open_results_page(context, target_url)
+            page_text_lower = (await page.inner_text("body"))[:1000].lower()
+            FULL_PAGE_INTERSTITIALS = [
+                "select your country",
+                "log in to continue",
+                "you must be logged in",
+                "you're not logged in",
+            ]
+            if any(p in page_text_lower for p in FULL_PAGE_INTERSTITIALS):
+                logging.warning("Landed on interstitial page — skipping brand")
+                return []
+
             cards = await collect_cards(page, limit)
             intercepted_video_urls = getattr(page, "_intercepted_video_urls", [])
 
