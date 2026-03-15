@@ -164,6 +164,12 @@ defmodule DailyRag.Segmenter do
       |> String.replace(~r/^```\s*/m, "")
       |> String.replace(~r/\s*```$/m, "")
       |> String.trim()
+      |> then(fn s ->
+        case Regex.run(~r/\[.*\]/s, s) do
+          [match] -> match
+          nil -> s
+        end
+      end)
 
     case Jason.decode(cleaned) do
       {:ok, segments} when is_list(segments) ->

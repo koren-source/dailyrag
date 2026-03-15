@@ -63,8 +63,15 @@ defmodule DailyRag.Pipeline.Daily do
          :ok <- validate_brand_override(brands, opts),
          :ok <- health_check(),
          {brands_to_segment, rotation_state} <- select_segmentation_brands(brands, opts),
-         scrape_state <- scrape_all_brands(brands_to_segment, Dedup.load(), Decay.load(), tracker, opts),
-         segment_state <- process_rotating_brands(brands_to_segment, scrape_state.new_ads_by_brand, tracker, opts) do
+         scrape_state <-
+           scrape_all_brands(brands_to_segment, Dedup.load(), Decay.load(), tracker, opts),
+         segment_state <-
+           process_rotating_brands(
+             brands_to_segment,
+             scrape_state.new_ads_by_brand,
+             tracker,
+             opts
+           ) do
       duration_seconds = System.monotonic_time(:second) - started_at
 
       unless dry_run do
@@ -82,8 +89,20 @@ defmodule DailyRag.Pipeline.Daily do
           "segments_written" => segment_state.segments_written,
           "errors" => format_errors(scrape_state.errors ++ segment_state.errors),
           "duration_seconds" => duration_seconds,
-          "status" => "success"
+          "status" =>
+            derive_status(
+              format_errors(scrape_state.errors ++ segment_state.errors),
+              segment_state.segments_written
+            )
         }
+
+      if report["segments_written"] == 0 and not dry_run do
+        alert(
+          "⚠️ DailyRag ran on #{report["run_date"]} but wrote 0 segments. " <>
+            "Brands scraped: #{report["brands_scraped"]}. " <>
+            "Errors: #{if report["errors"] == "", do: "none", else: report["errors"]}"
+        )
+      end
 
       update_tracker(tracker, report)
 
@@ -166,7 +185,15 @@ defmodule DailyRag.Pipeline.Daily do
   end
 
   defp scrape_all_brands(brands, dedup_index, decay_cache, tracker, opts) do
-    Enum.reduce(brands, initial_scrape_state(dedup_index, decay_cache), fn brand, acc ->
+    brands
+    |> Enum.with_index()
+    |> Enum.reduce(initial_scrape_state(dedup_index, decay_cache), fn {brand, idx}, acc ->
+      if idx > 0 do
+        delay_ms = 30_000 + :rand.uniform(30_000)
+        Logger.info("Inter-brand delay: #{delay_ms}ms before #{brand.brand_name}")
+        Process.sleep(delay_ms)
+      end
+
       update_tracker(tracker, %{phase: "phase_1_scrape", brand: brand.brand_name})
 
       case Scraper.scrape_brand(brand, limit: Map.get(opts, :limit, 30)) do
@@ -204,6 +231,55 @@ defmodule DailyRag.Pipeline.Daily do
 
           next_acc
 
+        {:error, :timeout} ->
+          Logger.warning("Scrape timeout for #{brand.brand_name}, retrying after 45s...")
+          Process.sleep(45_000)
+
+          case Scraper.scrape_brand(brand, limit: Map.get(opts, :limit, 30)) do
+            {:ok, ads} ->
+              ad_ids = Enum.map(ads, &(&1["ad_id"] || ""))
+              new_ads = Dedup.filter_new(acc.dedup_index, ads) |> Enum.map(&enrich_ad(&1, brand))
+              {disappeared_ids, _} = Decay.diff(acc.decay_cache, brand.brand_name, ad_ids)
+              maybe_alert_canary(acc.decay_cache, brand.brand_name, ad_ids)
+
+              next_acc = %{
+                acc
+                | dedup_index:
+                    Dedup.add(acc.dedup_index, brand.brand_name, Enum.map(new_ads, & &1["ad_id"])),
+                  decay_cache: Decay.update(acc.decay_cache, brand.brand_name, ad_ids),
+                  brand_results:
+                    acc.brand_results ++
+                      [
+                        %{
+                          brand: brand,
+                          active_count: length(ads),
+                          new_ads_count: length(new_ads),
+                          decayed_ids: disappeared_ids
+                        }
+                      ],
+                  new_ads_by_brand: Map.put(acc.new_ads_by_brand, brand.brand_name, new_ads),
+                  brands_scraped: acc.brands_scraped + 1,
+                  new_ads_found: acc.new_ads_found + length(new_ads)
+              }
+
+              update_tracker(tracker, %{
+                brands_scraped: next_acc.brands_scraped,
+                new_ads_found: next_acc.new_ads_found
+              })
+
+              next_acc
+
+            {:error, retry_reason} ->
+              error = "#{brand.brand_name}: #{inspect(retry_reason)} (after retry)"
+
+              Logger.warning(
+                "Retry also failed for #{brand.brand_name}: #{inspect(retry_reason)}"
+              )
+
+              append_tracker_error(tracker, error)
+              %{acc | errors: acc.errors ++ [error]}
+          end
+
         {:error, reason} ->
           error = "#{brand.brand_name}: #{inspect(reason)}"
           Logger.warning("scrape failed for #{brand.brand_name}: #{inspect(reason)}")
@@ -217,14 +293,20 @@ defmodule DailyRag.Pipeline.Daily do
     Enum.reduce(brands, %{ads_transcribed: 0, segments_written: 0, errors: []}, fn brand, acc ->
       update_tracker(tracker, %{phase: "phase_2_segment", brand: brand.brand_name})
 
-      task = Task.async(fn ->
-        ads = Map.get(new_ads_by_brand, brand.brand_name, [])
-        transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
-        transcribed_count = Enum.count(transcribed_ads, &(&1["copy_source"] == "whisper_transcript"))
-        {:ok, raw_segments} = Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads)
-        segments = enrich_segments(raw_segments, transcribed_ads, brand)
-        {transcribed_count, segments}
-      end)
+      task =
+        Task.async(fn ->
+          ads = Map.get(new_ads_by_brand, brand.brand_name, [])
+          transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
+
+          transcribed_count =
+            Enum.count(transcribed_ads, &(&1["copy_source"] == "whisper_transcript"))
+
+          {:ok, raw_segments} =
+            Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads)
+
+          segments = enrich_segments(raw_segments, transcribed_ads, brand)
+          {transcribed_count, segments}
+        end)
 
       case Task.yield(task, @brand_segment_timeout_ms) || Task.shutdown(task, :brutal_kill) do
         {:ok, {transcribed_count, segments}} ->
@@ -266,7 +348,9 @@ defmodule DailyRag.Pipeline.Daily do
 
   defp maybe_write_segments(_segments, _vertical, %{dry_run: true}), do: :ok
   defp maybe_write_segments([], _vertical, _opts), do: :ok
-  defp maybe_write_segments(segments, vertical, _opts), do: DailyWriter.write_segments(segments, vertical)
+
+  defp maybe_write_segments(segments, vertical, _opts),
+    do: DailyWriter.write_segments(segments, vertical)
 
   defp enrich_ad(ad, brand) do
     ad
@@ -310,7 +394,9 @@ defmodule DailyRag.Pipeline.Daily do
     case Date.from_iso8601(start_date || "") do
       {:ok, date} ->
         if Date.diff(Date.utc_today(), date) >= 60, do: "verified", else: "curated"
-      _ -> "curated"
+
+      _ ->
+        "curated"
     end
   end
 
@@ -341,17 +427,51 @@ defmodule DailyRag.Pipeline.Daily do
   end
 
   defp summary_text(report, brands_to_segment) do
-    """
-    DailyRag run #{report["status"]} on #{report["run_date"]}
+    header = status_header(report["status"], report)
+
+    body = """
+    #{header}
+    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     Brands scraped: #{report["brands_scraped"]}
     New ads found: #{report["new_ads_found"]}
     Ads transcribed: #{report["ads_transcribed"]}
     Segments written: #{report["segments_written"]}
     Rotating brands: #{Enum.map_join(brands_to_segment, ", ", & &1.brand_name)}
-    Errors: #{report["errors"]}
-    Duration (s): #{report["duration_seconds"]}
+    Duration: #{report["duration_seconds"]}s
     """
-    |> String.trim()
+
+    body =
+      if report["errors"] != "" do
+        body <> "\n⚠️ Errors: #{report["errors"]}"
+      else
+        body
+      end
+
+    String.trim(body)
+  end
+
+  defp status_header("success", report),
+    do: "✅ DailyRag — #{report["run_date"]}"
+
+  defp status_header("empty", report),
+    do: "⚠️ DailyRag — #{report["run_date"]} — 0 segments written"
+
+  defp status_header("partial_failure", report),
+    do: "⚠️ DailyRag — #{report["run_date"]} — partial failure"
+
+  defp status_header("failed", report),
+    do: "🔴 DailyRag — #{report["run_date"]} — FAILED (0 segments, errors present)"
+
+  defp status_header(status, report),
+    do: "DailyRag — #{report["run_date"]} — #{status}"
+
+  defp derive_status(errors, segments_written) do
+    cond do
+      errors != "" and segments_written > 0 -> "partial_failure"
+      errors != "" and segments_written == 0 -> "failed"
+      segments_written == 0 -> "empty"
+      true -> "success"
+    end
   end
 
   defp format_errors([]), do: ""
@@ -372,7 +492,9 @@ defmodule DailyRag.Pipeline.Daily do
 
   defp maybe_alert_canary(decay_cache, brand_name, ad_ids) do
     if Decay.canary_warning?(decay_cache, brand_name, ad_ids) do
-      yesterday_count = decay_cache |> Map.get("brands", %{}) |> Map.get(brand_name, []) |> length()
+      yesterday_count =
+        decay_cache |> Map.get("brands", %{}) |> Map.get(brand_name, []) |> length()
+
       alert(Slack.canary_warning(brand_name, yesterday_count))
     end
   end
