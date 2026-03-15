@@ -26,10 +26,42 @@ defmodule DailyRag.SegmenterTest do
   end
 
   test "segment_ads parses validated response content" do
-    ads = [%{"ad_id" => "abc", "copy" => "Example copy", "headline" => "Headline", "copy_source" => "transcript"}]
+    ads = [
+      %{
+        "ad_id" => "abc",
+        "copy" => "Example copy",
+        "headline" => "Headline",
+        "copy_source" => "transcript"
+      }
+    ]
 
     assert {:ok, [segment]} = DailyRag.Segmenter.segment_ads("AG1", "supplements", ads)
     assert segment["segment_type"] == "problem-solution"
     assert segment["source_ad_id"] == "abc"
+  end
+
+  test "segment_ads ignores trailing text after the json array" do
+    fake_claude = Application.fetch_env!(:dailyrag, :claude_bin)
+
+    File.write!(
+      fake_claude,
+      """
+      #!/bin/sh
+      printf '%s' '[{"segment_type":"Hook","principle":"Bold claim","transcript":"Transcript","why_it_works":"Because it is specific","format":"video"}]\n\nSide note: this ad also uses urgency.'
+      """
+    )
+
+    ads = [
+      %{
+        "ad_id" => "def",
+        "copy" => "Example copy",
+        "headline" => "Headline",
+        "copy_source" => "transcript"
+      }
+    ]
+
+    assert {:ok, [segment]} = DailyRag.Segmenter.segment_ads("AG1", "supplements", ads)
+    assert segment["segment_type"] == "hook"
+    assert segment["source_ad_id"] == "def"
   end
 end
