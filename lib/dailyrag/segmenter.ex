@@ -6,7 +6,7 @@ defmodule DailyRag.Segmenter do
   @max_ads_per_run 20
   @retry_delays_ms [0, 2_000, 5_000, 10_000]
   @rate_limit_delay_ms 1_000
-  @claude_timeout_ms 120_000
+  @claude_timeout_ms 180_000
 
   @approved_principles """
   Hook: curiosity-gap, pattern-interrupt, bold-claim, problem-callout, social-proof-open, contrarian, question, before-after, urgency, identity-callout
@@ -31,22 +31,53 @@ defmodule DailyRag.Segmenter do
 
   @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]}
   def segment_ads(brand_name, vertical, ads) do
-    ads
-    |> Enum.take(@max_ads_per_run)
-    |> Enum.map(&normalize_ad(&1, brand_name, vertical))
-    |> Enum.reduce({[], false}, fn ad, {acc, has_called_api?} ->
-      maybe_rate_limit(ad, has_called_api?)
+    normalized =
+      ads
+      |> Enum.take(@max_ads_per_run)
+      |> Enum.map(&normalize_ad(&1, brand_name, vertical))
+      |> Enum.reject(fn ad ->
+        ad["copy_source"] == "copy_unavailable" or
+          not is_binary(ad["copy"]) or ad["copy"] == ""
+      end)
 
-      case segment_once(ad) do
-        {:ok, segments, called_api?} ->
-          {acc ++ segments, has_called_api? or called_api?}
+    if normalized == [] do
+      {:ok, []}
+    else
+      prompt = build_batch_prompt(normalized)
 
-        {:error, reason, called_api?} ->
-          Logger.warning("segmentation failed for #{ad["ad_id"]}: #{inspect(reason)}")
-          {acc, has_called_api? or called_api?}
+      case call_claude_with_retries(prompt) do
+        {:ok, text} ->
+          case parse_batch_segments(text, normalized) do
+            {:ok, segments} -> {:ok, segments}
+            {:error, reason} ->
+              Logger.warning("batch parse failed: #{inspect(reason)}, falling back to per-ad")
+              segment_ads_serial(normalized)
+          end
+
+        {:error, reason} ->
+          Logger.warning("batch claude call failed: #{inspect(reason)}, falling back to per-ad")
+          segment_ads_serial(normalized)
       end
-    end)
-    |> then(fn {segments, _has_called_api?} -> {:ok, segments} end)
+    end
+  end
+
+  defp segment_ads_serial(ads) do
+    result =
+      Enum.reduce(ads, {[], false}, fn ad, {acc, has_called_api?} ->
+        maybe_rate_limit(ad, has_called_api?)
+
+        case segment_once(ad) do
+          {:ok, segments, called_api?} ->
+            {acc ++ segments, has_called_api? or called_api?}
+
+          {:error, reason, called_api?} ->
+            Logger.warning("segmentation failed for #{ad["ad_id"]}: #{inspect(reason)}")
+            {acc, has_called_api? or called_api?}
+        end
+      end)
+
+    {segments, _} = result
+    {:ok, segments}
   end
 
   defp maybe_rate_limit(%{"copy_source" => "copy_unavailable"}, _has_called_api?), do: :ok
@@ -90,7 +121,7 @@ defmodule DailyRag.Segmenter do
 
   defp call_claude(prompt) do
     bin = claude_bin()
-    model = Application.get_env(:dailyrag, :anthropic_model, "claude-sonnet-4-6")
+    model = Application.get_env(:dailyrag, :anthropic_model, "claude-opus-4-6")
 
     tmp =
       Path.join(System.tmp_dir!(), "dr_prompt_#{:erlang.unique_integer([:positive])}.txt")
@@ -156,6 +187,90 @@ defmodule DailyRag.Segmenter do
     ]
     """
   end
+
+  defp build_batch_prompt(ads) do
+    ads_section =
+      ads
+      |> Enum.map_join("\n\n", fn ad ->
+        """
+        AD_ID: #{ad["ad_id"]}
+        Brand: #{ad["brand"]} | Vertical: #{ad["vertical"]} | Start: #{ad["start_date"]} | Source: #{ad["copy_source"]}
+        TRANSCRIPT:
+        #{ad["copy"]}
+        """
+      end)
+
+    """
+    You are a video ad segmentation expert for Cutbox.ai. Segment each ad transcript below into distinct parts and tag each segment.
+
+    For each segment provide:
+    - segment_type: hook | body | cta | education | social-proof | offer | b-roll-direction
+    - format: talking-head | voiceover | text-on-screen | ugc | interview | testimonial | demo | mixed
+    - principle: 1-3 from the approved list, comma-separated
+    - transcript: the EXACT words from that segment
+    - why_it_works: 1-2 sentences on the persuasion technique used
+
+    APPROVED PRINCIPLES:
+    #{@approved_principles}
+
+    A typical video ad has at minimum: hook + body + CTA.
+
+    ADS TO SEGMENT:
+    #{ads_section}
+
+    RESPOND WITH ONLY a JSON object keyed by ad_id. Each value is an array of segment objects. No markdown, no explanation:
+    {
+      "ad_12345": [
+        {
+          "segment_type": "hook",
+          "format": "talking-head",
+          "principle": "bold-claim, curiosity-gap",
+          "transcript": "exact words here",
+          "why_it_works": "explanation here"
+        }
+      ],
+      "ad_67890": [ ... ]
+    }
+    """
+  end
+
+  defp parse_batch_segments(text, ads) when is_binary(text) do
+    cleaned =
+      text
+      |> String.replace(~r/^```json\s*/m, "")
+      |> String.replace(~r/^```\s*/m, "")
+      |> String.replace(~r/\s*```$/m, "")
+      |> String.trim()
+      |> then(fn s ->
+        case Regex.run(~r/\{.*\}/s, s) do
+          [match] -> match
+          nil -> s
+        end
+      end)
+
+    case Jason.decode(cleaned) do
+      {:ok, result} when is_map(result) ->
+        segments =
+          Enum.flat_map(ads, fn ad ->
+            case Map.get(result, ad["ad_id"]) do
+              segs when is_list(segs) ->
+                Enum.map(segs, &validate_segment(&1, ad["ad_id"]))
+              _ ->
+                Logger.warning("no segments returned for ad_id=#{ad["ad_id"]}")
+                []
+            end
+          end)
+        {:ok, segments}
+
+      {:ok, _other} ->
+        {:error, :not_a_map}
+
+      {:error, reason} ->
+        {:error, {:json_parse, reason}}
+    end
+  end
+
+  defp parse_batch_segments(_text, _ads), do: {:error, :missing_text}
 
   defp parse_segments(text, ad_id) when is_binary(text) do
     cleaned =
