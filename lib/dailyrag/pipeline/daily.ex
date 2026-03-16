@@ -7,7 +7,7 @@ defmodule DailyRag.Pipeline.Daily do
   alias DailyRag.Sheets.DailyWriter
 
   @pipeline_timeout_ms :timer.minutes(180)
-  @brand_segment_timeout_ms :timer.minutes(8)
+  @brand_segment_timeout_ms :timer.minutes(6)
 
   @spec run() :: :ok | {:error, term()}
   def run, do: run(%{})
@@ -15,7 +15,7 @@ defmodule DailyRag.Pipeline.Daily do
   @spec run(map()) :: :ok | {:error, term()}
   def run(opts) do
     {:ok, tracker} = Agent.start_link(fn -> tracker_state() end)
-    task = Task.async(fn -> do_run(opts, tracker) end)
+    task = Task.Supervisor.async_nolink(DailyRag.TaskSupervisor, fn -> do_run(opts, tracker) end)
 
     try do
       case Task.yield(task, @pipeline_timeout_ms) do
@@ -304,7 +304,7 @@ defmodule DailyRag.Pipeline.Daily do
       update_tracker(tracker, %{phase: "phase_2_segment", brand: brand.brand_name})
 
       task =
-        Task.async(fn ->
+        Task.Supervisor.async_nolink(DailyRag.TaskSupervisor, fn ->
           ads = Map.get(new_ads_by_brand, brand.brand_name, [])
           transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
 
@@ -348,7 +348,7 @@ defmodule DailyRag.Pipeline.Daily do
           end
 
         nil ->
-          error = "#{brand.brand_name}: segmentation timed out after 8 minutes"
+          error = "#{brand.brand_name}: segmentation timed out after 6 minutes"
           Logger.warning(error)
           append_tracker_error(tracker, error)
           %{acc | errors: acc.errors ++ [error]}

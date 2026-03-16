@@ -11,7 +11,7 @@ defmodule DailyRag.SegmenterTest do
       fake_claude,
       """
       #!/bin/sh
-      printf '%s' '[{"segment_type":"Problem-Solution","principle":"Specific principle","transcript":"Transcript","why_it_works":"Because it is specific","format":"video","source_ad_id":"abc"}]'
+      printf '%s' '{"abc":[{"segment_type":"Problem-Solution","principle":"Specific principle","transcript":"Transcript","why_it_works":"Because it is specific","format":"video"}]}'
       """
     )
 
@@ -47,7 +47,7 @@ defmodule DailyRag.SegmenterTest do
       fake_claude,
       """
       #!/bin/sh
-      printf '%s' '[{"segment_type":"Hook","principle":"Bold claim","transcript":"Transcript","why_it_works":"Because it is specific","format":"video"}]\n\nSide note: this ad also uses urgency.'
+      printf '%s' '{"def":[{"segment_type":"Hook","principle":"Bold claim","transcript":"Transcript","why_it_works":"Because it is specific","format":"video"}]}\n\nSide note: this ad also uses urgency.'
       """
     )
 
