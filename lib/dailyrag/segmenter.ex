@@ -4,7 +4,7 @@ defmodule DailyRag.Segmenter do
   require Logger
 
   @default_claude_bin "/opt/homebrew/bin/claude"
-  @default_model "claude-opus-4-0-20250514"
+  @default_model "claude-opus-4-6"
   @max_ads_per_run 20
   @retry_delays_ms [0, 2_000, 5_000, 10_000]
   @rate_limit_delay_ms 1_000
@@ -364,11 +364,7 @@ defmodule DailyRag.Segmenter do
     do: Application.get_env(:dailyrag, :claude_bin, @default_claude_bin)
 
   defp model do
-    Application.get_env(
-      :dailyrag,
-      :claude_model,
-      Application.get_env(:dailyrag, :anthropic_model, @default_model)
-    )
+    Application.get_env(:dailyrag, :claude_model, @default_model)
   end
 
   defp sleep_fun,
