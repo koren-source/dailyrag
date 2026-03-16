@@ -3,10 +3,12 @@ defmodule DailyRag.Segmenter do
 
   require Logger
 
+  @default_claude_bin "/opt/homebrew/bin/claude"
+  @default_model "claude-opus-4-6"
   @max_ads_per_run 20
   @retry_delays_ms [0, 2_000, 5_000, 10_000]
   @rate_limit_delay_ms 1_000
-  @claude_timeout_ms 180_000
+  @claude_timeout_ms 600_000
 
   @approved_principles """
   Hook: curiosity-gap, pattern-interrupt, bold-claim, problem-callout, social-proof-open, contrarian, question, before-after, urgency, identity-callout
@@ -37,7 +39,7 @@ defmodule DailyRag.Segmenter do
       |> Enum.map(&normalize_ad(&1, brand_name, vertical))
       |> Enum.reject(fn ad ->
         ad["copy_source"] == "copy_unavailable" or
-          not is_binary(ad["copy"]) or ad["copy"] == ""
+          not is_binary(ad["copy"]) or String.trim(ad["copy"]) == ""
       end)
 
     if normalized == [] do
@@ -48,7 +50,9 @@ defmodule DailyRag.Segmenter do
       case call_claude_with_retries(prompt) do
         {:ok, text} ->
           case parse_batch_segments(text, normalized) do
-            {:ok, segments} -> {:ok, segments}
+            {:ok, segments} ->
+              {:ok, segments}
+
             {:error, reason} ->
               Logger.warning("batch parse failed: #{inspect(reason)}, falling back to per-ad")
               segment_ads_serial(normalized)
@@ -85,22 +89,25 @@ defmodule DailyRag.Segmenter do
   defp maybe_rate_limit(_ad, true), do: sleep_fun().(@rate_limit_delay_ms)
 
   defp segment_once(%{"copy_source" => "copy_unavailable"}), do: {:ok, [], false}
-
-  defp segment_once(%{"copy" => copy}) when not is_binary(copy) or copy == "",
-    do: {:ok, [], false}
+  defp segment_once(%{"copy" => copy}) when not is_binary(copy), do: {:ok, [], false}
+  defp segment_once(%{"copy" => copy}) when is_binary(copy) and byte_size(copy) == 0, do: {:ok, [], false}
 
   defp segment_once(ad) do
-    prompt = build_prompt(ad)
+    if String.trim(ad["copy"]) == "" do
+      {:ok, [], false}
+    else
+      prompt = build_prompt(ad)
 
-    case call_claude_with_retries(prompt) do
-      {:ok, text} ->
-        case parse_segments(text, ad["ad_id"]) do
-          {:ok, segments} -> {:ok, segments, true}
-          {:error, reason} -> {:error, reason, true}
-        end
+      case call_claude_with_retries(prompt) do
+        {:ok, text} ->
+          case parse_segments(text, ad["ad_id"]) do
+            {:ok, segments} -> {:ok, segments, true}
+            {:error, reason} -> {:error, reason, true}
+          end
 
-      {:error, reason} ->
-        {:error, reason, true}
+        {:error, reason} ->
+          {:error, reason, true}
+      end
     end
   end
 
@@ -120,9 +127,6 @@ defmodule DailyRag.Segmenter do
   end
 
   defp call_claude(prompt) do
-    bin = claude_bin()
-    model = Application.get_env(:dailyrag, :anthropic_model, "claude-opus-4-6")
-
     tmp =
       Path.join(System.tmp_dir!(), "dr_prompt_#{:erlang.unique_integer([:positive])}.txt")
 
@@ -131,15 +135,20 @@ defmodule DailyRag.Segmenter do
 
       task =
         Task.async(fn ->
-          System.cmd("sh", ["-c", ~s|"#{bin}" --print --model #{model} < "#{tmp}"|],
-            stderr_to_stdout: false
+          System.cmd("sh", ["-c", ~s|"#{claude_bin()}" --print --model "#{model()}" < "#{tmp}"|],
+            stderr_to_stdout: true
           )
         end)
 
       case Task.yield(task, @claude_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {output, 0}} -> {:ok, String.trim(output)}
-        {:ok, {_output, code}} -> {:error, {:claude_exit, code}}
-        nil -> {:error, :claude_timeout}
+        {:ok, {output, 0}} ->
+          {:ok, String.trim(output)}
+
+        {:ok, {output, code}} ->
+          {:error, {:claude_exit, code, String.trim(output)}}
+
+        nil ->
+          {:error, :claude_timeout}
       end
     rescue
       e -> {:error, {:claude_exception, Exception.message(e)}}
@@ -255,11 +264,13 @@ defmodule DailyRag.Segmenter do
             case Map.get(result, ad["ad_id"]) do
               segs when is_list(segs) ->
                 Enum.map(segs, &validate_segment(&1, ad["ad_id"]))
+
               _ ->
                 Logger.warning("no segments returned for ad_id=#{ad["ad_id"]}")
                 []
             end
           end)
+
         {:ok, segments}
 
       {:ok, _other} ->
@@ -350,7 +361,11 @@ defmodule DailyRag.Segmenter do
   end
 
   defp claude_bin,
-    do: Application.get_env(:dailyrag, :claude_bin, "claude")
+    do: Application.get_env(:dailyrag, :claude_bin, @default_claude_bin)
+
+  defp model do
+    Application.get_env(:dailyrag, :claude_model, @default_model)
+  end
 
   defp sleep_fun,
     do: Application.get_env(:dailyrag, :segmenter_sleep_fun, &Process.sleep/1)

@@ -1,8 +1,8 @@
 defmodule DailyRag.Rotation do
   @moduledoc """
   Tracks which brands to segment today.
-  Rotates 2 supplement brands + 2 home-services brands per day independently.
-  State stored in data/brand_rotation.json with per-vertical indices.
+  Rotates supplement and home-services brands independently using brand-name completion state.
+  State stored in data/brand_rotation.json.
   """
 
   @rotation_path "data/brand_rotation.json"
@@ -29,7 +29,7 @@ defmodule DailyRag.Rotation do
   @doc """
   Select brands for segmentation across all verticals.
   Returns {selected_brands, new_state} where selected_brands is a flat list
-  of 2 supplements + 2 home-services brands (or fewer if a vertical has < 2).
+  of the selected brands for each vertical.
   """
   @spec next_rotating_brands([term()], map(), keyword()) :: {[term()], map()}
   def next_rotating_brands(brands, state, opts \\ []) do
@@ -56,14 +56,14 @@ defmodule DailyRag.Rotation do
       end)
 
     new_state = %{
+      "completed" => state["completed"],
       "last_run" => today,
-      "verticals" => new_verticals
+      "verticals" => new_verticals,
+      "last_brands" => Enum.map(all_selected, &brand_name/1)
     }
 
     {all_selected, new_state}
   end
-
-  # --- Legacy API kept for backward compatibility ---
 
   @spec next_brands([term()], map(), pos_integer()) :: {[term()], map()}
   def next_brands(brands, state, count \\ 3)
@@ -81,24 +81,32 @@ defmodule DailyRag.Rotation do
 
       {selected, state}
     else
-      total = length(brands)
-      start_index = rem(max(state["index"], 0), total)
+      completed =
+        state["completed"]
+        |> Enum.filter(fn brand -> find_brand(brands, brand) != nil end)
 
-      selected =
-        0..(min(count, total) - 1)
-        |> Enum.map(fn offset -> Enum.at(brands, rem(start_index + offset, total)) end)
+      remaining = Enum.reject(brands, &(brand_name(&1) in completed))
+
+      {remaining, completed} =
+        if remaining == [] do
+          {brands, []}
+        else
+          {remaining, completed}
+        end
+
+      selected = Enum.take(remaining, count)
+      selected_names = Enum.map(selected, &brand_name/1)
 
       next_state = %{
-        "index" => rem(start_index + count, total),
+        "completed" => completed ++ selected_names,
         "last_run" => today,
-        "last_brands" => Enum.map(selected, &brand_name/1)
+        "verticals" => state["verticals"],
+        "last_brands" => selected_names
       }
 
       {selected, next_state}
     end
   end
-
-  # --- Private helpers ---
 
   defp pick_from_vertical([], vert_state, _count, _today), do: {[], vert_state}
 
@@ -111,18 +119,28 @@ defmodule DailyRag.Rotation do
 
       {selected, vert_state}
     else
-      total = length(pool)
-      pick = min(count, total)
-      start_index = rem(max(vert_state["index"], 0), total)
+      pool_names = Enum.map(pool, &brand_name/1)
 
-      selected =
-        0..(pick - 1)
-        |> Enum.map(fn offset -> Enum.at(pool, rem(start_index + offset, total)) end)
+      completed =
+        vert_state["completed"]
+        |> Enum.filter(&(&1 in pool_names))
+
+      remaining = Enum.reject(pool, &(brand_name(&1) in completed))
+
+      {remaining, completed} =
+        if remaining == [] do
+          {pool, []}
+        else
+          {remaining, completed}
+        end
+
+      selected = Enum.take(remaining, count)
+      selected_names = Enum.map(selected, &brand_name/1)
 
       new_vert_state = %{
-        "index" => rem(start_index + pick, total),
+        "completed" => completed ++ selected_names,
         "last_run" => today,
-        "last_brands" => Enum.map(selected, &brand_name/1)
+        "last_brands" => selected_names
       }
 
       {selected, new_vert_state}
@@ -130,23 +148,12 @@ defmodule DailyRag.Rotation do
   end
 
   defp normalize_state(state) when is_map(state) do
-    cond do
-      is_map(Map.get(state, "verticals")) ->
-        %{
-          "last_run" => Map.get(state, "last_run"),
-          "verticals" => normalize_verticals(Map.get(state, "verticals", %{})),
-          "index" => safe_int(Map.get(state, "index", 0)),
-          "last_brands" => safe_list(Map.get(state, "last_brands", []))
-        }
-
-      true ->
-        %{
-          "last_run" => Map.get(state, "last_run"),
-          "verticals" => %{},
-          "index" => safe_int(Map.get(state, "index", 0)),
-          "last_brands" => safe_list(Map.get(state, "last_brands", []))
-        }
-    end
+    %{
+      "completed" => safe_list(Map.get(state, "completed", [])),
+      "last_run" => Map.get(state, "last_run"),
+      "verticals" => normalize_verticals(Map.get(state, "verticals", %{})),
+      "last_brands" => safe_list(Map.get(state, "last_brands", []))
+    }
   end
 
   defp normalize_state(_), do: fresh()
@@ -155,7 +162,7 @@ defmodule DailyRag.Rotation do
     Map.new(verticals, fn {k, v} ->
       {k,
        %{
-         "index" => safe_int(Map.get(v, "index", 0)),
+         "completed" => safe_list(Map.get(v, "completed", [])),
          "last_run" => Map.get(v, "last_run"),
          "last_brands" => safe_list(Map.get(v, "last_brands", []))
        }}
@@ -164,24 +171,21 @@ defmodule DailyRag.Rotation do
 
   defp normalize_verticals(_), do: %{}
 
-  defp safe_int(v) when is_integer(v), do: v
-  defp safe_int(_), do: 0
+  defp safe_list(value) when is_list(value), do: value
+  defp safe_list(_value), do: []
 
-  defp safe_list(v) when is_list(v), do: v
-  defp safe_list(_), do: []
-
-  defp fresh_vertical, do: %{"index" => 0, "last_run" => nil, "last_brands" => []}
+  defp fresh_vertical, do: %{"completed" => [], "last_run" => nil, "last_brands" => []}
 
   defp fresh do
-    %{"last_run" => nil, "verticals" => %{}, "index" => 0, "last_brands" => []}
+    %{"completed" => [], "last_run" => nil, "verticals" => %{}, "last_brands" => []}
   end
 
-  defp vertical_key(%{vertical: v}), do: v
-  defp vertical_key(%{"vertical" => v}), do: v
+  defp vertical_key(%{vertical: vertical}), do: vertical
+  defp vertical_key(%{"vertical" => vertical}), do: vertical
   defp vertical_key(_), do: "unknown"
 
   defp find_brand(brands, name), do: Enum.find(brands, &(brand_name(&1) == name))
-  defp brand_name(%{brand_name: n}), do: n
-  defp brand_name(%{"brand_name" => n}), do: n
+  defp brand_name(%{brand_name: brand_name}), do: brand_name
+  defp brand_name(%{"brand_name" => brand_name}), do: brand_name
   defp brand_name(other), do: other
 end

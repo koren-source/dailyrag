@@ -1,12 +1,12 @@
 # DailyRag — Ad Creative RAG Enrichment Pipeline
 
-Automated pipeline that scrapes Meta Ad Library daily, segments ad copy with Claude Sonnet 4.6, and builds a structured RAG database in Google Sheets. Tracks ad lifecycle (emergence → decay), discovers new brands weekly, and posts summaries to Slack.
+Automated pipeline that scrapes Meta Ad Library daily, segments ad copy with the Claude CLI, and builds a structured RAG database in Google Sheets. Tracks ad lifecycle (emergence → decay), discovers new brands weekly, and posts summaries to Slack.
 
 ## Architecture
 
 **Elixir-first with Python sidecar.**
 
-- **Elixir** handles: pipeline orchestration, dedup, decay tracking, Claude API calls (segmentation), Google Sheets integration, Slack posting, discovery logic, CLI flags
+- **Elixir** handles: pipeline orchestration, dedup, decay tracking, Claude CLI calls (segmentation), Google Sheets integration, Slack posting, discovery logic, CLI flags
 - **Python** handles: Meta Ad Library browser scraping via Scrapling (~50 lines)
 - Elixir calls the Python scraper via a Port, receives raw ad data as JSON, handles all processing
 
@@ -17,7 +17,7 @@ Automated pipeline that scrapes Meta Ad Library daily, segments ad copy with Cla
 - Elixir 1.15+
 - Python 3.10+
 - Google Sheets API credentials (OAuth2)
-- Anthropic API key
+- Claude CLI with an authenticated subscription session
 - Slack Bot token
 
 ### Install
@@ -42,7 +42,8 @@ cp .env.example .env
 ```
 
 Required variables:
-- `ANTHROPIC_API_KEY` — Claude Sonnet 4.6 for ad segmentation
+- `CLAUDE_BIN` — Path to the `claude` CLI binary used for segmentation
+- `CLAUDE_MODEL` — Claude model passed to `claude --print --model`
 - `GOOGLE_CREDENTIALS_PATH` — Path to Google OAuth2 token JSON
 - `GOOGLE_OAUTH_PATH` — Path to Google OAuth2 client credentials
 - `SLACK_BOT_TOKEN` — Slack bot token for #rag-builder
@@ -83,7 +84,7 @@ mix dailyrag --discover --verbose
 1. Load active brands from `Brand_Config` sheet
 2. For each brand, scrape Meta Ad Library via Python sidecar
 3. Dedup against local index — skip already-processed ads
-4. Segment new ads with Claude Sonnet 4.6 (hook, body, CTA, offer, etc.)
+4. Segment new ads with the Claude CLI (hook, body, CTA, offer, etc.)
 5. Write segments to `Supplements_Daily` or `HomeServices_Daily` sheet
 6. Run confidence promotion (emerging → curated → verified based on ad longevity)
 7. Detect decayed ads (ran yesterday but not today) and mark inactive
@@ -129,7 +130,7 @@ dailyrag/
 │       ├── scraper.ex               # Python Port wrapper
 │       ├── dedup.ex                 # Local dedup index (JSON file)
 │       ├── decay.ex                 # Decay tracking (JSON cache)
-│       ├── segmentation.ex          # Claude Sonnet 4.6 API
+│       ├── segmentation.ex          # Claude CLI integration
 │       ├── sheets.ex                # Google Sheets API (OAuth2)
 │       └── slack.ex                 # Slack notifications
 ├── lib/mix/tasks/dailyrag.ex        # Mix task entry point

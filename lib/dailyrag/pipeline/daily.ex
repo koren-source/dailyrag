@@ -7,7 +7,7 @@ defmodule DailyRag.Pipeline.Daily do
   alias DailyRag.Sheets.DailyWriter
 
   @pipeline_timeout_ms :timer.minutes(180)
-  @brand_segment_timeout_ms :timer.minutes(6)
+  @brand_segment_timeout_ms :timer.minutes(15)
 
   @spec run() :: :ok | {:error, term()}
   def run, do: run(%{})
@@ -36,16 +36,45 @@ defmodule DailyRag.Pipeline.Daily do
 
   @spec health_check(keyword()) :: :ok | :abort
   def health_check(opts) do
-    with {:ok, brands} <- DailyWriter.read_brand_config(),
-         canary_brand <- canary_brand(brands),
-         {:ok, ads} <- Scraper.scrape_brand(canary_brand, limit: Keyword.get(opts, :limit, 5)) do
-      if ads == [] do
-        alert("DailyRag health check failed: BuckedUp returned 0 ads. Aborting daily run.")
-        :abort
-      else
-        :ok
-      end
-    else
+    case DailyWriter.read_brand_config() do
+      {:ok, brands} ->
+        canaries = pick_canary_brands(brands, 3)
+        limit = Keyword.get(opts, :limit, 5)
+
+        results =
+          Enum.map(canaries, fn brand ->
+            case Scraper.scrape_brand(brand, limit: limit) do
+              {:ok, ads} when ads != [] -> {:ok, brand.brand_name, length(ads)}
+              {:ok, []} -> {:fail, brand.brand_name, :zero_ads}
+              {:error, reason} -> {:fail, brand.brand_name, reason}
+            end
+          end)
+
+        successes = Enum.filter(results, &match?({:ok, _, _}, &1))
+        failures = Enum.filter(results, &match?({:fail, _, _}, &1))
+
+        Enum.each(failures, fn {:fail, name, reason} ->
+          Logger.warning("Health check canary failed: #{name} - #{inspect(reason)}")
+        end)
+
+        if successes == [] do
+          names = Enum.map_join(canaries, ", ", & &1.brand_name)
+
+          alert(
+            "DailyRag health check failed: all #{length(canaries)} canaries returned 0 ads (#{names}). Aborting daily run."
+          )
+
+          :abort
+        else
+          passed =
+            Enum.map_join(successes, ", ", fn {:ok, name, count} ->
+              "#{name}(#{count})"
+            end)
+
+          Logger.info("Health check passed: #{passed}")
+          :ok
+        end
+
       {:error, reason} ->
         alert("DailyRag health check failed: #{inspect(reason)}")
         :abort
@@ -61,7 +90,7 @@ defmodule DailyRag.Pipeline.Daily do
 
     with {:ok, brands} <- load_active_brands(opts),
          :ok <- validate_brand_override(brands, opts),
-         :ok <- health_check(),
+         :ok <- health_check(limit: Map.get(opts, :limit, 5)),
          {brands_to_segment, rotation_state} <- select_segmentation_brands(brands, opts),
          scrape_state <-
            scrape_all_brands(brands_to_segment, Dedup.load(), Decay.load(), tracker, opts),
@@ -302,58 +331,93 @@ defmodule DailyRag.Pipeline.Daily do
 
     Enum.reduce(brands, %{ads_transcribed: 0, segments_written: 0, errors: []}, fn brand, acc ->
       update_tracker(tracker, %{phase: "phase_2_segment", brand: brand.brand_name})
+      ads = Map.get(new_ads_by_brand, brand.brand_name, [])
+      segment_start = System.monotonic_time(:second)
+
+      Logger.info("[#{brand.brand_name}] segmentation started - #{length(ads)} ads to process")
 
       task =
         Task.Supervisor.async_nolink(DailyRag.TaskSupervisor, fn ->
-          ads = Map.get(new_ads_by_brand, brand.brand_name, [])
-          transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
-
-          transcribed_count =
-            Enum.count(transcribed_ads, &(&1["copy_source"] == "whisper_transcript"))
-
-          {:ok, raw_segments} =
-            Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads)
-
-          segments = enrich_segments(raw_segments, transcribed_ads, brand)
-          {transcribed_count, segments}
+          segment_brand(brand, ads, opts)
         end)
 
       case Task.yield(task, @brand_segment_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {transcribed_count, segments}} ->
-          case maybe_write_segments(segments, brand.vertical, opts) do
-            :ok ->
-              next_acc = %{
-                ads_transcribed: acc.ads_transcribed + transcribed_count,
-                segments_written: acc.segments_written + length(segments),
-                errors: acc.errors
-              }
+        {:ok, {:ok, transcribed_count, segments_count}} ->
+          next_acc = %{
+            ads_transcribed: acc.ads_transcribed + transcribed_count,
+            segments_written: acc.segments_written + segments_count,
+            errors: acc.errors
+          }
 
-              update_tracker(tracker, %{
-                ads_transcribed: next_acc.ads_transcribed,
-                segments_written: next_acc.segments_written
-              })
+          update_tracker(tracker, %{
+            ads_transcribed: next_acc.ads_transcribed,
+            segments_written: next_acc.segments_written
+          })
 
-              next_acc
+          segment_duration = System.monotonic_time(:second) - segment_start
 
-            {:error, reason} ->
-              error = "#{brand.brand_name}: #{inspect(reason)}"
-              Logger.warning("sheet write failed for #{brand.brand_name}: #{inspect(reason)}")
-              append_tracker_error(tracker, error)
+          Logger.info(
+            "[#{brand.brand_name}] segmentation complete - #{segments_count} segments in #{segment_duration}s"
+          )
 
-              %{
-                ads_transcribed: acc.ads_transcribed + transcribed_count,
-                segments_written: acc.segments_written,
-                errors: acc.errors ++ [error]
-              }
-          end
+          next_acc
+
+        {:ok, {:error, reason, transcribed_count}} ->
+          error = "#{brand.brand_name}: #{inspect(reason)}"
+          Logger.warning("segmentation failed for #{brand.brand_name}: #{inspect(reason)}")
+          append_tracker_error(tracker, error)
+
+          next_acc = %{
+            ads_transcribed: acc.ads_transcribed + transcribed_count,
+            segments_written: acc.segments_written,
+            errors: acc.errors ++ [error]
+          }
+
+          update_tracker(tracker, %{ads_transcribed: next_acc.ads_transcribed})
+          next_acc
+
+        {:exit, reason} ->
+          error = "#{brand.brand_name}: segmentation task exited #{inspect(reason)}"
+          Logger.warning(error)
+          append_tracker_error(tracker, error)
+          %{acc | errors: acc.errors ++ [error]}
 
         nil ->
-          error = "#{brand.brand_name}: segmentation timed out after 6 minutes"
+          segment_duration = System.monotonic_time(:second) - segment_start
+
+          error =
+            "#{brand.brand_name}: segmentation timed out after #{div(@brand_segment_timeout_ms, 60_000)} minutes (#{segment_duration}s elapsed)"
+
           Logger.warning(error)
           append_tracker_error(tracker, error)
           %{acc | errors: acc.errors ++ [error]}
       end
     end)
+  end
+
+  defp segment_brand(_brand, [], _opts), do: {:ok, 0, 0}
+
+  defp segment_brand(brand, ads, opts) do
+    transcribed_ads = Scraper.transcribe_batch(ads, max_concurrency: 3)
+
+    transcribed_count =
+      Enum.count(transcribed_ads, &(&1["copy_source"] == "whisper_transcript"))
+
+    case Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads) do
+      {:ok, raw_segments} ->
+        segments = enrich_segments(raw_segments, transcribed_ads, brand)
+
+        case maybe_write_segments(segments, brand.vertical, opts) do
+          :ok ->
+            {:ok, transcribed_count, length(segments)}
+
+          {:error, reason} ->
+            {:error, reason, transcribed_count}
+        end
+
+      {:error, reason} ->
+        {:error, reason, transcribed_count}
+    end
   end
 
   defp maybe_write_segments(_segments, _vertical, %{dry_run: true}), do: :ok
@@ -487,17 +551,22 @@ defmodule DailyRag.Pipeline.Daily do
   defp format_errors([]), do: ""
   defp format_errors(errors), do: Enum.reject(errors, &(&1 in [nil, ""])) |> Enum.join(" | ")
 
-  defp canary_brand(brands) do
-    Enum.find(brands, &(&1.brand_name == "BuckedUp")) ||
-      %{
-        brand_name: "BuckedUp",
-        name: "BuckedUp",
-        vertical: "dtc-supplements",
-        search_query: "BuckedUp",
-        ad_library_url: nil,
-        url: nil,
-        active: true
-      }
+  defp pick_canary_brands(brands, count) do
+    preferred = ["BuckedUp", "Ghost", "RYSE"]
+
+    preferred_brands =
+      preferred
+      |> Enum.map(fn name -> Enum.find(brands, &(&1.brand_name == name)) end)
+      |> Enum.reject(&is_nil/1)
+
+    if length(preferred_brands) >= count do
+      Enum.take(preferred_brands, count)
+    else
+      remaining = Enum.reject(brands, &(&1.brand_name in preferred))
+
+      (preferred_brands ++ Enum.take(Enum.shuffle(remaining), count - length(preferred_brands)))
+      |> Enum.take(count)
+    end
   end
 
   defp maybe_alert_canary(decay_cache, brand_name, ad_ids) do
