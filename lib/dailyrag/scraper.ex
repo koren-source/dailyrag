@@ -189,10 +189,21 @@ defmodule DailyRag.Scraper do
 
         case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
           {:ok, {output, 0}} ->
-            Jason.decode(output)
+            case Jason.decode(output) do
+              {:ok, decoded} ->
+                {:ok, decoded}
+
+              {:error, _reason} ->
+                case extract_json_line(output) do
+                  nil -> {:error, {:no_json_in_output, String.slice(output, 0, 500)}}
+                  json -> Jason.decode(json)
+                end
+            end
 
           {:ok, {output, 2}} ->
-            case Jason.decode(output) do
+            json_output = extract_json_line(output) || output
+
+            case Jason.decode(json_output) do
               {:ok, %{"error" => "interstitial"} = decoded} ->
                 {:error, {:interstitial, decoded["detail"]}}
 
@@ -229,6 +240,19 @@ defmodule DailyRag.Scraper do
       nil -> get_value(map, rest, default)
       value -> value
     end
+  end
+
+  defp extract_json_line(output) do
+    output
+    |> String.split("\n")
+    |> Enum.reverse()
+    |> Enum.find_value(fn line ->
+      trimmed = String.trim(line)
+
+      if String.starts_with?(trimmed, "[") or String.starts_with?(trimmed, "{") do
+        trimmed
+      end
+    end)
   end
 
   defp get_value(_map, [], default), do: default
