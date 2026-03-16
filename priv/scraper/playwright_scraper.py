@@ -12,7 +12,7 @@ from typing import Dict, List, Optional
 from urllib.parse import quote_plus
 
 from playwright.async_api import BrowserContext, Page, TimeoutError, async_playwright
-from playwright_stealth import stealth_async
+from playwright_stealth import Stealth
 
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
@@ -217,6 +217,22 @@ async def parse_card(card, intercepted_video_urls: List[str]) -> Optional[Dict[s
             has_video = False
 
         headline = await extract_headline(card)
+        INTERSTITIAL_PHRASES = [
+            "select country",
+            "log in to facebook",
+            "log in",
+            "you must log in",
+            "create new account",
+            "sign up for facebook",
+            "cookie policy",
+            "we use cookies",
+        ]
+        headline_lower = headline.lower()
+        text_lower = text.lower()[:500]
+        if any(phrase in headline_lower or phrase in text_lower for phrase in INTERSTITIAL_PHRASES):
+            logging.warning(f"Skipping interstitial card: '{headline[:60]}'")
+            return None
+
         start_date = parse_started_date(combined)
         video_url = await extract_video_url(card, intercepted_video_urls) if has_video else ""
 
@@ -255,7 +271,7 @@ def register_video_interceptor(page: Page, intercepted_video_urls: List[str]) ->
 
 async def open_results_page(context: BrowserContext, target_url: str) -> Page:
     page = await context.new_page()
-    await stealth_async(page)
+    # stealth applied via context manager in scrape_once
     intercepted_video_urls: List[str] = []
     register_video_interceptor(page, intercepted_video_urls)
     page._intercepted_video_urls = intercepted_video_urls  # type: ignore[attr-defined]
@@ -268,7 +284,7 @@ async def open_results_page(context: BrowserContext, target_url: str) -> Page:
 
 
 async def scrape_once(target_url: str, limit: int) -> List[Dict[str, str]]:
-    async with async_playwright() as playwright:
+    async with Stealth().use_async(async_playwright()) as playwright:
         browser = await playwright.chromium.launch(
             headless=True,
             args=["--disable-blink-features=AutomationControlled"],
@@ -284,7 +300,7 @@ async def scrape_once(target_url: str, limit: int) -> List[Dict[str, str]]:
 
             page = await open_results_page(context, target_url)
             page_text_lower = (await page.inner_text("body"))[:1000].lower()
-            full_page_interstitials = [
+            FULL_PAGE_INTERSTITIALS = [
                 "select your country",
                 "log in to continue",
                 "you must be logged in",
@@ -292,10 +308,9 @@ async def scrape_once(target_url: str, limit: int) -> List[Dict[str, str]]:
                 "create new account",
                 "log in to facebook",
             ]
-            matched = [phrase for phrase in full_page_interstitials if phrase in page_text_lower]
-
+            matched = [p for p in FULL_PAGE_INTERSTITIALS if p in page_text_lower]
             if matched:
-                logging.warning(f"Landed on interstitial page — matched: {matched}")
+                logging.warning(f"Landed on interstitial page - matched: {matched}")
                 raise InterstitialError(f"Facebook interstitial detected: {matched[0]}")
 
             cards = await collect_cards(page, limit)
@@ -342,7 +357,6 @@ async def scrape(target_url: str, limit: int) -> List[Dict[str, str]]:
 def main() -> int:
     args = parse_args()
     target_url = args.url or build_search_url(args.brand)
-
     try:
         ads = asyncio.run(scrape(target_url, max(args.limit, 1)))
         print(json.dumps(ads))

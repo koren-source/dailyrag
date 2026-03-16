@@ -6,9 +6,9 @@ defmodule DailyRag.Segmenter do
   @default_claude_bin "/opt/homebrew/bin/claude"
   @default_model "claude-opus-4-0-20250514"
   @max_ads_per_run 20
-  @batch_size 10
-  @claude_timeout_ms 600_000
   @retry_delays_ms [0, 2_000, 5_000, 10_000]
+  @rate_limit_delay_ms 1_000
+  @claude_timeout_ms 600_000
 
   @approved_principles """
   Hook: curiosity-gap, pattern-interrupt, bold-claim, problem-callout, social-proof-open, contrarian, question, before-after, urgency, identity-callout
@@ -25,123 +25,161 @@ defmodule DailyRag.Segmenter do
 
   @spec segment(map()) :: {:ok, [map()]} | {:error, term()}
   def segment(ad) do
-    normalized = normalize_ad(ad)
-    segment_ads(normalized["brand"], normalized["vertical"], [normalized])
-  end
-
-  @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]} | {:error, term()}
-  def segment_ads(brand_name, vertical, ads) do
-    ads
-    |> Enum.take(@max_ads_per_run)
-    |> Enum.map(&normalize_ad(&1, brand_name, vertical))
-    |> Enum.reject(&skip_segmentation?/1)
-    |> Enum.chunk_every(@batch_size)
-    |> Enum.reduce_while({:ok, []}, fn batch, {:ok, acc} ->
-      case segment_batch(brand_name, vertical, batch) do
-        {:ok, segments} -> {:cont, {:ok, acc ++ segments}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-  end
-
-  defp skip_segmentation?(%{"copy_source" => "copy_unavailable"}), do: true
-  defp skip_segmentation?(%{"copy" => copy}) when not is_binary(copy), do: true
-  defp skip_segmentation?(%{"copy" => copy}), do: String.trim(copy) == ""
-  defp skip_segmentation?(_ad), do: false
-
-  defp segment_batch(_brand_name, _vertical, []), do: {:ok, []}
-
-  defp segment_batch(brand_name, vertical, ads_batch) do
-    prompt = build_prompt(brand_name, vertical, ads_batch)
-
-    with {:ok, output} <- request_with_retries(prompt) do
-      parse_segments(output)
+    case segment_once(normalize_ad(ad)) do
+      {:ok, segments, _called_api?} -> {:ok, segments}
+      {:error, reason, _called_api?} -> {:error, reason}
     end
   end
 
-  defp request_with_retries(prompt) do
-    Enum.reduce_while(@retry_delays_ms, {:error, :unknown}, fn delay_ms, _acc ->
-      if delay_ms > 0, do: Process.sleep(delay_ms)
+  @spec segment_ads(String.t(), String.t(), [map()]) :: {:ok, [map()]}
+  def segment_ads(brand_name, vertical, ads) do
+    normalized =
+      ads
+      |> Enum.take(@max_ads_per_run)
+      |> Enum.map(&normalize_ad(&1, brand_name, vertical))
+      |> Enum.reject(fn ad ->
+        ad["copy_source"] == "copy_unavailable" or
+          not is_binary(ad["copy"]) or String.trim(ad["copy"]) == ""
+      end)
 
-      case call_claude(prompt) do
-        {:ok, output} ->
-          {:halt, {:ok, output}}
+    if normalized == [] do
+      {:ok, []}
+    else
+      prompt = build_batch_prompt(normalized)
+
+      case call_claude_with_retries(prompt) do
+        {:ok, text} ->
+          case parse_batch_segments(text, normalized) do
+            {:ok, segments} ->
+              {:ok, segments}
+
+            {:error, reason} ->
+              Logger.warning("batch parse failed: #{inspect(reason)}, falling back to per-ad")
+              segment_ads_serial(normalized)
+          end
 
         {:error, reason} ->
-          Logger.warning("claude CLI request failed: #{inspect(reason)}")
+          Logger.warning("batch claude call failed: #{inspect(reason)}, falling back to per-ad")
+          segment_ads_serial(normalized)
+      end
+    end
+  end
+
+  defp segment_ads_serial(ads) do
+    result =
+      Enum.reduce(ads, {[], false}, fn ad, {acc, has_called_api?} ->
+        maybe_rate_limit(ad, has_called_api?)
+
+        case segment_once(ad) do
+          {:ok, segments, called_api?} ->
+            {acc ++ segments, has_called_api? or called_api?}
+
+          {:error, reason, called_api?} ->
+            Logger.warning("segmentation failed for #{ad["ad_id"]}: #{inspect(reason)}")
+            {acc, has_called_api? or called_api?}
+        end
+      end)
+
+    {segments, _} = result
+    {:ok, segments}
+  end
+
+  defp maybe_rate_limit(%{"copy_source" => "copy_unavailable"}, _has_called_api?), do: :ok
+  defp maybe_rate_limit(_ad, false), do: :ok
+  defp maybe_rate_limit(_ad, true), do: sleep_fun().(@rate_limit_delay_ms)
+
+  defp segment_once(%{"copy_source" => "copy_unavailable"}), do: {:ok, [], false}
+  defp segment_once(%{"copy" => copy}) when not is_binary(copy), do: {:ok, [], false}
+  defp segment_once(%{"copy" => copy}) when is_binary(copy) and byte_size(copy) == 0, do: {:ok, [], false}
+
+  defp segment_once(ad) do
+    if String.trim(ad["copy"]) == "" do
+      {:ok, [], false}
+    else
+      prompt = build_prompt(ad)
+
+      case call_claude_with_retries(prompt) do
+        {:ok, text} ->
+          case parse_segments(text, ad["ad_id"]) do
+            {:ok, segments} -> {:ok, segments, true}
+            {:error, reason} -> {:error, reason, true}
+          end
+
+        {:error, reason} ->
+          {:error, reason, true}
+      end
+    end
+  end
+
+  defp call_claude_with_retries(prompt) do
+    Enum.reduce_while(@retry_delays_ms, {:error, :unknown}, fn delay_ms, _acc ->
+      if delay_ms > 0, do: sleep_fun().(delay_ms)
+
+      case call_claude(prompt) do
+        {:ok, text} ->
+          {:halt, {:ok, text}}
+
+        {:error, reason} ->
+          Logger.warning("claude call failed: #{inspect(reason)}")
           {:cont, {:error, reason}}
       end
     end)
   end
 
   defp call_claude(prompt) do
-    tmp_path = prompt_tmp_path()
-    File.write!(tmp_path, prompt)
-
-    task =
-      Task.async(fn ->
-        System.cmd(
-          "sh",
-          ["-c", ~s|"#{claude_bin()}" --print --model "#{model()}" < "#{tmp_path}"|],
-          stderr_to_stdout: true
-        )
-      end)
+    tmp =
+      Path.join(System.tmp_dir!(), "dr_prompt_#{:erlang.unique_integer([:positive])}.txt")
 
     try do
+      File.write!(tmp, prompt)
+
+      task =
+        Task.async(fn ->
+          System.cmd("sh", ["-c", ~s|"#{claude_bin()}" --print --model "#{model()}" < "#{tmp}"|],
+            stderr_to_stdout: true
+          )
+        end)
+
       case Task.yield(task, @claude_timeout_ms) || Task.shutdown(task, :brutal_kill) do
         {:ok, {output, 0}} ->
           {:ok, String.trim(output)}
 
-        {:ok, {output, exit_code}} ->
-          {:error, {:cli_error, exit_code, String.trim(output)}}
+        {:ok, {output, code}} ->
+          {:error, {:claude_exit, code, String.trim(output)}}
 
         nil ->
-          {:error, :timeout}
+          {:error, :claude_timeout}
       end
+    rescue
+      e -> {:error, {:claude_exception, Exception.message(e)}}
     after
-      File.rm(tmp_path)
+      File.rm(tmp)
     end
   end
 
-  defp build_prompt(brand_name, vertical, ads_batch) do
-    ads_text =
-      ads_batch
-      |> Enum.with_index(1)
-      |> Enum.map(fn {ad, index} ->
-        """
-        AD #{index}
-        - Ad ID: #{ad["ad_id"]}
-        - Brand: #{brand_name}
-        - Vertical: #{vertical}
-        - Ad Start Date: #{ad["start_date"]}
-        - Copy Source: #{ad["copy_source"]}
-        - Media Format: #{ad["format"]}
-        - Headline: #{ad["headline"]}
-
-        TRANSCRIPT:
-        "#{ad["copy"]}"
-        """
-        |> String.trim()
-      end)
-      |> Enum.join("\n\n")
-
+  defp build_prompt(ad) do
     """
-    You are a video ad segmentation expert for Cutbox.ai. Given Meta ad transcripts, break each ad into distinct segments and tag each one.
+    You are a video ad segmentation expert for Cutbox.ai. Given a video ad transcript, break it into distinct segments and tag each one.
 
-    ADS:
-    #{ads_text}
+    TRANSCRIPT:
+    "#{ad["copy"]}"
+
+    METADATA:
+    - Brand: #{ad["brand"]}
+    - Vertical: #{ad["vertical"]}
+    - Ad ID: #{ad["ad_id"]}
+    - Ad Start Date: #{ad["start_date"]}
+    - Copy Source: #{ad["copy_source"]}
 
     INSTRUCTIONS:
-    1. Identify each distinct segment in each transcript (hook, body, cta, education, social-proof, offer, b-roll-direction).
-    2. A typical ad has at minimum one hook, one body, and one cta.
-    3. For each segment, provide ALL of these fields:
-       - source_ad_id: the exact Ad ID for the ad this segment came from
+    1. Identify each distinct segment in the transcript (hook, body, CTA, education, social-proof, offer, b-roll-direction)
+    2. A typical video ad has at minimum: one hook + one body + one CTA
+    3. For each segment, provide:
        - segment_type: hook | body | cta | education | social-proof | offer | b-roll-direction
        - format: talking-head | voiceover | text-on-screen | ugc | interview | testimonial | demo | mixed
        - principle: 1-3 from the approved list below, comma-separated
-       - transcript: the exact words from that segment
+       - transcript: the EXACT words from that segment
        - why_it_works: 1-2 sentences explaining the persuasion technique
-    4. Return one flat JSON array containing segments for all ads in this batch.
 
     APPROVED PRINCIPLES:
     #{@approved_principles}
@@ -149,7 +187,6 @@ defmodule DailyRag.Segmenter do
     RESPOND WITH ONLY a JSON array. No markdown, no explanation, no preamble:
     [
       {
-        "source_ad_id": "123",
         "segment_type": "hook",
         "format": "talking-head",
         "principle": "bold-claim, curiosity-gap",
@@ -158,20 +195,111 @@ defmodule DailyRag.Segmenter do
       }
     ]
     """
-    |> String.trim()
   end
 
-  defp parse_segments(text) when is_binary(text) do
+  defp build_batch_prompt(ads) do
+    ads_section =
+      ads
+      |> Enum.map_join("\n\n", fn ad ->
+        """
+        AD_ID: #{ad["ad_id"]}
+        Brand: #{ad["brand"]} | Vertical: #{ad["vertical"]} | Start: #{ad["start_date"]} | Source: #{ad["copy_source"]}
+        TRANSCRIPT:
+        #{ad["copy"]}
+        """
+      end)
+
+    """
+    You are a video ad segmentation expert for Cutbox.ai. Segment each ad transcript below into distinct parts and tag each segment.
+
+    For each segment provide:
+    - segment_type: hook | body | cta | education | social-proof | offer | b-roll-direction
+    - format: talking-head | voiceover | text-on-screen | ugc | interview | testimonial | demo | mixed
+    - principle: 1-3 from the approved list, comma-separated
+    - transcript: the EXACT words from that segment
+    - why_it_works: 1-2 sentences on the persuasion technique used
+
+    APPROVED PRINCIPLES:
+    #{@approved_principles}
+
+    A typical video ad has at minimum: hook + body + CTA.
+
+    ADS TO SEGMENT:
+    #{ads_section}
+
+    RESPOND WITH ONLY a JSON object keyed by ad_id. Each value is an array of segment objects. No markdown, no explanation:
+    {
+      "ad_12345": [
+        {
+          "segment_type": "hook",
+          "format": "talking-head",
+          "principle": "bold-claim, curiosity-gap",
+          "transcript": "exact words here",
+          "why_it_works": "explanation here"
+        }
+      ],
+      "ad_67890": [ ... ]
+    }
+    """
+  end
+
+  defp parse_batch_segments(text, ads) when is_binary(text) do
     cleaned =
       text
       |> String.replace(~r/^```json\s*/m, "")
       |> String.replace(~r/^```\s*/m, "")
       |> String.replace(~r/\s*```$/m, "")
       |> String.trim()
+      |> then(fn s ->
+        case Regex.run(~r/\{.*\}/s, s) do
+          [match] -> match
+          nil -> s
+        end
+      end)
+
+    case Jason.decode(cleaned) do
+      {:ok, result} when is_map(result) ->
+        segments =
+          Enum.flat_map(ads, fn ad ->
+            case Map.get(result, ad["ad_id"]) do
+              segs when is_list(segs) ->
+                Enum.map(segs, &validate_segment(&1, ad["ad_id"]))
+
+              _ ->
+                Logger.warning("no segments returned for ad_id=#{ad["ad_id"]}")
+                []
+            end
+          end)
+
+        {:ok, segments}
+
+      {:ok, _other} ->
+        {:error, :not_a_map}
+
+      {:error, reason} ->
+        {:error, {:json_parse, reason}}
+    end
+  end
+
+  defp parse_batch_segments(_text, _ads), do: {:error, :missing_text}
+
+  defp parse_segments(text, ad_id) when is_binary(text) do
+    cleaned =
+      text
+      |> String.replace(~r/^```json\s*/m, "")
+      |> String.replace(~r/^```\s*/m, "")
+      |> String.replace(~r/\s*```$/m, "")
+      |> String.trim()
+      |> then(fn s ->
+        case Regex.run(~r/\[.*\]/s, s) do
+          [match] -> match
+          nil -> s
+        end
+      end)
 
     case Jason.decode(cleaned) do
       {:ok, segments} when is_list(segments) ->
-        {:ok, Enum.map(segments, &validate_segment/1)}
+        {:ok, Enum.map(segments, &validate_segment(&1, ad_id))}
 
       {:ok, _other} ->
         {:error, :not_a_list}
@@ -181,18 +309,29 @@ defmodule DailyRag.Segmenter do
     end
   end
 
-  defp parse_segments(_text), do: {:error, :missing_text}
+  defp parse_segments(_text, _ad_id), do: {:error, :missing_text}
 
-  defp validate_segment(segment) when is_map(segment) do
+  defp validate_segment(segment, ad_id) when is_map(segment) do
     %{
-      "segment_type" => value_as_string(segment["segment_type"], "body"),
-      "format" => value_as_string(segment["format"], "mixed"),
+      "segment_type" => normalize_segment_type(value_as_string(segment["segment_type"])),
+      "format" => normalize_format(value_as_string(segment["format"])),
       "principle" => normalize_principle(segment["principle"]),
       "transcript" => value_as_string(segment["transcript"]),
       "why_it_works" => value_as_string(segment["why_it_works"]),
-      "source_ad_id" => value_as_string(segment["source_ad_id"])
+      "source_ad_id" => ad_id
     }
   end
+
+  defp normalize_segment_type(""), do: "body"
+
+  defp normalize_segment_type(value) do
+    value
+    |> String.downcase()
+    |> String.replace("_", "-")
+  end
+
+  defp normalize_format(""), do: "mixed"
+  defp normalize_format(value), do: value |> String.downcase() |> String.replace("_", "-")
 
   defp normalize_principle(values) when is_list(values) do
     values
@@ -202,6 +341,10 @@ defmodule DailyRag.Segmenter do
   end
 
   defp normalize_principle(value), do: value_as_string(value)
+
+  defp value_as_string(nil), do: ""
+  defp value_as_string(value) when is_binary(value), do: String.trim(value)
+  defp value_as_string(value), do: value |> to_string() |> String.trim()
 
   defp normalize_ad(ad, brand_name \\ nil, vertical \\ nil) do
     %{
@@ -217,14 +360,8 @@ defmodule DailyRag.Segmenter do
     }
   end
 
-  defp prompt_tmp_path do
-    name = "dailyrag-claude-#{System.unique_integer([:positive, :monotonic])}.txt"
-    Path.join(System.tmp_dir!(), name)
-  end
-
-  defp claude_bin do
-    Application.get_env(:dailyrag, :claude_bin, @default_claude_bin)
-  end
+  defp claude_bin,
+    do: Application.get_env(:dailyrag, :claude_bin, @default_claude_bin)
 
   defp model do
     Application.get_env(
@@ -234,15 +371,8 @@ defmodule DailyRag.Segmenter do
     )
   end
 
-  defp value_as_string(nil, default), do: default
-
-  defp value_as_string(value, _default) do
-    value
-    |> to_string()
-    |> String.trim()
-  end
-
-  defp value_as_string(value), do: value_as_string(value, "")
+  defp sleep_fun,
+    do: Application.get_env(:dailyrag, :segmenter_sleep_fun, &Process.sleep/1)
 
   defp get_value(map, [key | rest], default) do
     case Map.get(map, key) do

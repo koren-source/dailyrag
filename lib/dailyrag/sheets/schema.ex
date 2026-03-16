@@ -18,7 +18,7 @@ defmodule DailyRag.Sheets.Schema do
 
   @spec brand_config_headers() :: [String.t()]
   def brand_config_headers do
-    ["brand_name", "vertical", "search_query", "ad_library_url", "active"]
+    ["brand_name", "vertical", "meta_library_url", "status", "date_added", "source"]
   end
 
   @spec discovery_keywords_headers() :: [String.t()]
@@ -88,18 +88,18 @@ defmodule DailyRag.Sheets.Schema do
   def parse_brand_config_row(row) do
     brand_name = Enum.at(row, 0, "")
     vertical = row |> Enum.at(1, "") |> normalize_vertical()
-    search_query = Enum.at(row, 2, "")
-    ad_library_url = Enum.at(row, 3, "")
+    ad_library_url = Enum.at(row, 2, "")
+    status = Enum.at(row, 3, "")
 
     %{
       brand_name: brand_name,
       name: brand_name,
       vertical: vertical,
-      search_query: search_query,
+      search_query: brand_name,
       ad_library_url: ad_library_url,
       url: ad_library_url,
-      active: parse_boolean(Enum.at(row, 4, "")),
-      active_raw: Enum.at(row, 4, "")
+      active: parse_boolean(status),
+      active_raw: status
     }
   end
 
@@ -112,8 +112,9 @@ defmodule DailyRag.Sheets.Schema do
   def tab_for_vertical(vertical),
     do: raise(ArgumentError, "unsupported vertical #{inspect(vertical)}")
 
-  defp parse_boolean(value) when value in [true, "TRUE", "true", "True", "1", 1, "yes", "YES"],
-    do: true
+  defp parse_boolean(value)
+       when value in [true, "TRUE", "true", "True", "1", 1, "yes", "YES", "active", "Active", "ACTIVE"],
+       do: true
 
   defp parse_boolean(_), do: false
 
