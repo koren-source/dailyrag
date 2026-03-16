@@ -17,6 +17,13 @@ from playwright_stealth import stealth_async
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(message)s")
 
+
+class InterstitialError(Exception):
+    """Raised when the scraper lands on a Facebook login/country wall."""
+
+    pass
+
+
 USER_AGENTS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
@@ -276,6 +283,21 @@ async def scrape_once(target_url: str, limit: int) -> List[Dict[str, str]]:
             )
 
             page = await open_results_page(context, target_url)
+            page_text_lower = (await page.inner_text("body"))[:1000].lower()
+            full_page_interstitials = [
+                "select your country",
+                "log in to continue",
+                "you must be logged in",
+                "you're not logged in",
+                "create new account",
+                "log in to facebook",
+            ]
+            matched = [phrase for phrase in full_page_interstitials if phrase in page_text_lower]
+
+            if matched:
+                logging.warning(f"Landed on interstitial page — matched: {matched}")
+                raise InterstitialError(f"Facebook interstitial detected: {matched[0]}")
+
             cards = await collect_cards(page, limit)
             intercepted_video_urls = getattr(page, "_intercepted_video_urls", [])
 
@@ -307,6 +329,8 @@ async def scrape(target_url: str, limit: int) -> List[Dict[str, str]]:
     for attempt in range(2):
         try:
             return await scrape_once(target_url, limit)
+        except InterstitialError:
+            raise
         except TimeoutError:
             logging.warning(f"page load timeout on attempt {attempt + 1}")
         except Exception as exc:
@@ -318,9 +342,14 @@ async def scrape(target_url: str, limit: int) -> List[Dict[str, str]]:
 def main() -> int:
     args = parse_args()
     target_url = args.url or build_search_url(args.brand)
-    ads = asyncio.run(scrape(target_url, max(args.limit, 1)))
-    print(json.dumps(ads))
-    return 0
+
+    try:
+        ads = asyncio.run(scrape(target_url, max(args.limit, 1)))
+        print(json.dumps(ads))
+        return 0
+    except InterstitialError as exc:
+        print(json.dumps({"error": "interstitial", "detail": str(exc)}))
+        return 2
 
 
 if __name__ == "__main__":

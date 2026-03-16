@@ -166,13 +166,23 @@ defmodule DailyRag.Scraper do
         task =
           Task.async(fn ->
             System.cmd(python, [script_path | args],
-              env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
+              env: [{"PYTHONDONTWRITEBYTECODE", "1"}],
+              stderr_to_stdout: true
             )
           end)
 
         case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
           {:ok, {output, 0}} ->
             Jason.decode(output)
+
+          {:ok, {output, 2}} ->
+            case Jason.decode(output) do
+              {:ok, %{"error" => "interstitial"} = decoded} ->
+                {:error, {:interstitial, decoded["detail"]}}
+
+              _ ->
+                {:error, {:interstitial, String.trim(output)}}
+            end
 
           {:ok, {output, exit_code}} ->
             case Jason.decode(output) do

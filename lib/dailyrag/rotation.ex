@@ -43,17 +43,26 @@ defmodule DailyRag.Rotation do
 
       {selected, state}
     else
-      total = length(brands)
-      start_index = rem(max(state["index"], 0), total)
+      completed =
+        state["completed"]
+        |> Enum.filter(fn brand -> find_brand(brands, brand) != nil end)
 
-      selected =
-        0..(min(count, total) - 1)
-        |> Enum.map(fn offset -> Enum.at(brands, rem(start_index + offset, total)) end)
+      remaining = Enum.reject(brands, &(brand_name(&1) in completed))
+
+      {remaining, completed} =
+        if remaining == [] do
+          {brands, []}
+        else
+          {remaining, completed}
+        end
+
+      selected = Enum.take(remaining, count)
+      selected_names = Enum.map(selected, &brand_name/1)
 
       next_state = %{
-        "index" => rem(start_index + count, total),
+        "completed" => completed ++ selected_names,
         "last_run" => today,
-        "last_brands" => Enum.map(selected, &brand_name/1)
+        "last_brands" => selected_names
       }
 
       {selected, next_state}
@@ -68,22 +77,25 @@ defmodule DailyRag.Rotation do
     end
   end
 
-  defp normalize_state(state) do
-    fresh()
-    |> Map.merge(state || %{})
-    |> Map.update!("index", fn
-      value when is_integer(value) -> value
-      _ -> 0
-    end)
-    |> Map.update!("last_brands", fn
-      value when is_list(value) -> value
-      _ -> []
-    end)
+  defp normalize_state(state) when is_map(state) do
+    %{
+      "completed" => safe_list(Map.get(state, "completed", [])),
+      "last_run" => Map.get(state, "last_run"),
+      "last_brands" => safe_list(Map.get(state, "last_brands", []))
+    }
   end
 
-  defp find_brand(brands, brand_name), do: Enum.find(brands, &(brand_name(&1) == brand_name))
-  defp brand_name(%{brand_name: brand_name}), do: brand_name
-  defp brand_name(%{"brand_name" => brand_name}), do: brand_name
+  defp normalize_state(_state), do: fresh()
+
+  defp safe_list(value) when is_list(value), do: value
+  defp safe_list(_value), do: []
+
+  defp find_brand(brands, brand), do: Enum.find(brands, &(brand_name(&1) == brand))
+  defp brand_name(%{brand_name: brand}), do: brand
+  defp brand_name(%{"brand_name" => brand}), do: brand
   defp brand_name(other), do: other
-  defp fresh, do: %{"index" => 0, "last_run" => nil, "last_brands" => []}
+
+  defp fresh do
+    %{"completed" => [], "last_run" => nil, "last_brands" => []}
+  end
 end
