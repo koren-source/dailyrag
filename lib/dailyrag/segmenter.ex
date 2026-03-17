@@ -142,7 +142,30 @@ defmodule DailyRag.Segmenter do
 
       case Task.yield(task, @claude_timeout_ms) || Task.shutdown(task, :brutal_kill) do
         {:ok, {output, 0}} ->
-          {:ok, String.trim(output)}
+          trimmed = String.trim(output)
+
+          if String.starts_with?(trimmed, "{") or String.starts_with?(trimmed, "[") do
+            {:ok, trimmed}
+          else
+            # stderr may be mixed into stdout — scan from the bottom for the JSON payload
+            json_line =
+              output
+              |> String.split("\n")
+              |> Enum.reverse()
+              |> Enum.find(fn line ->
+                t = String.trim(line)
+                String.starts_with?(t, "{") or String.starts_with?(t, "[")
+              end)
+
+            case json_line do
+              nil ->
+                Logger.warning("call_claude: no JSON found in output (#{byte_size(output)} bytes, first 200: #{String.slice(output, 0, 200)})")
+                {:ok, trimmed}
+
+              line ->
+                {:ok, String.trim(line)}
+            end
+          end
 
         {:ok, {output, code}} ->
           {:error, {:claude_exit, code, String.trim(output)}}
@@ -184,7 +207,7 @@ defmodule DailyRag.Segmenter do
     APPROVED PRINCIPLES:
     #{@approved_principles}
 
-    RESPOND WITH ONLY a JSON array. No markdown, no explanation, no preamble:
+    RESPOND WITH ONLY a JSON array. No markdown, no code fences, no explanation, no preamble. Start your response with [ and end with ]:
     [
       {
         "segment_type": "hook",
@@ -227,9 +250,9 @@ defmodule DailyRag.Segmenter do
     ADS TO SEGMENT:
     #{ads_section}
 
-    RESPOND WITH ONLY a JSON object keyed by ad_id. Each value is an array of segment objects. No markdown, no explanation:
+    RESPOND WITH ONLY a JSON object. Keys must be the EXACT AD_ID values from the input above — do NOT add any prefix like "ad_". Each value is an array of segment objects. No markdown, no code fences, no explanation. Start your response with { and end with }:
     {
-      "ad_12345": [
+      "<exact AD_ID from input>": [
         {
           "segment_type": "hook",
           "format": "talking-head",
@@ -237,8 +260,7 @@ defmodule DailyRag.Segmenter do
           "transcript": "exact words here",
           "why_it_works": "explanation here"
         }
-      ],
-      "ad_67890": [ ... ]
+      ]
     }
     """
   end
@@ -261,12 +283,23 @@ defmodule DailyRag.Segmenter do
       {:ok, result} when is_map(result) ->
         segments =
           Enum.flat_map(ads, fn ad ->
-            case Map.get(result, ad["ad_id"]) do
+            ad_id = ad["ad_id"]
+
+            segs =
+              Map.get(result, ad_id) ||
+                Map.get(result, "ad_#{ad_id}") ||
+                Map.get(result, "ad-#{ad_id}") ||
+                Map.get(result, "AD_#{ad_id}")
+
+            case segs do
               segs when is_list(segs) ->
-                Enum.map(segs, &validate_segment(&1, ad["ad_id"]))
+                Enum.map(segs, &validate_segment(&1, ad_id))
 
               _ ->
-                Logger.warning("no segments returned for ad_id=#{ad["ad_id"]}")
+                Logger.warning(
+                  "no segments returned for ad_id=#{ad_id} (response keys: #{inspect(Map.keys(result) |> Enum.take(5))})"
+                )
+
                 []
             end
           end)
