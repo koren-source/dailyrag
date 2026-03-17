@@ -405,6 +405,19 @@ defmodule DailyRag.Pipeline.Daily do
 
     case Segmenter.segment_ads(brand.brand_name, brand.vertical, transcribed_ads) do
       {:ok, raw_segments} ->
+        if raw_segments == [] and length(transcribed_ads) > 0 do
+          segmentable =
+            Enum.count(transcribed_ads, fn ad ->
+              ad["copy_source"] != "copy_unavailable" and
+                is_binary(ad["copy"]) and String.trim(ad["copy"] || "") != ""
+            end)
+
+          Logger.warning(
+            "[#{brand.brand_name}] segmenter returned 0 segments from #{length(transcribed_ads)} transcribed ads " <>
+              "(#{segmentable} had usable copy) — likely ad_id key mismatch or empty Claude response"
+          )
+        end
+
         segments = enrich_segments(raw_segments, transcribed_ads, brand)
 
         case maybe_write_segments(segments, brand.vertical, opts) do
