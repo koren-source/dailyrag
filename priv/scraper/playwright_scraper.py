@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from urllib.parse import quote_plus
 
-from playwright.async_api import BrowserContext, Page, TimeoutError, async_playwright
+from playwright.async_api import BrowserContext, Locator, Page, TimeoutError, async_playwright
 from playwright_stealth import Stealth
 
 
@@ -35,9 +35,9 @@ USER_AGENTS = [
 CARD_SELECTORS = [
     '[data-testid="ad-archive-result"]',
     'div[role="article"]',
-    'div[xstyle*="boxSizing:border-box"]',
-    'div:has-text("Started running on")',
 ]
+
+LIBRARY_ID_PATTERN = re.compile(r"Library ID:\s*\d{8,20}", re.I)
 
 HEADLINE_SELECTORS = [
     'div[role="heading"]',
@@ -61,6 +61,16 @@ AD_ID_PATTERNS = [
     r"/ads/library/\?id=(\d{8,20})",
     r'"adArchiveID":"(\d{8,20})"',
 ]
+
+IGNORED_HEADLINE_TEXT = {
+    "active",
+    "platforms",
+    "open dropdown",
+    "see ad details",
+    "sponsored",
+    "learn more",
+    "this ad has multiple versions",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -110,6 +120,20 @@ def extract_ad_id(text: str) -> str:
     return ""
 
 
+def normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
+
+
+def is_noise_text(value: str) -> bool:
+    normalized = normalize_text(value).lower()
+    return (
+        not normalized
+        or normalized in IGNORED_HEADLINE_TEXT
+        or normalized.startswith("library id:")
+        or normalized.startswith("started running on")
+    )
+
+
 async def random_pause(min_seconds: float = 0.5, max_seconds: float = 3.0) -> None:
     await asyncio.sleep(random.uniform(min_seconds, max_seconds))
 
@@ -142,24 +166,106 @@ async def dismiss_overlays(page: Page) -> None:
         pass
 
 
-async def collect_cards(page: Page, limit: int) -> List:
-    seen = []
+async def handle_country_selector(page: Page) -> None:
+    modal = page.locator(
+        'div[role="dialog"]:has-text("Select country"), '
+        'div[role="dialog"]:has-text("Select your country")'
+    ).first
+
+    try:
+        await modal.wait_for(state="visible", timeout=4_000)
+    except Exception:
+        return
+
+    for locator in [
+        modal.get_by_role("button", name="United States").first,
+        modal.locator('text=/^United States$/i').first,
+        modal.locator('[role="option"]:has-text("United States")').first,
+    ]:
+        try:
+            if await locator.count() > 0:
+                await locator.click(timeout=2_000)
+                break
+        except Exception:
+            continue
+
+    await asyncio.sleep(0.5)
+
+    for locator in [
+        modal.get_by_role("button", name="Continue").first,
+        modal.locator('button:has-text("Continue"), [role="button"]:has-text("Continue")').first,
+    ]:
+        try:
+            if await locator.count() > 0:
+                await locator.click(timeout=2_000)
+                await asyncio.sleep(1.0)
+                return
+        except Exception:
+            continue
+
+
+async def maybe_add_card(card: Locator, seen_ids: set[str], cards: List[Locator]) -> bool:
+    try:
+        target = card.first
+        if await target.count() == 0:
+            return False
+
+        html = await target.inner_html()
+        text = re.sub(r"\s+", " ", await target.inner_text())
+        ad_id = extract_ad_id(f"{html}\n{text}")
+
+        if not ad_id or ad_id in seen_ids:
+            return False
+
+        seen_ids.add(ad_id)
+        cards.append(target)
+        return True
+    except Exception:
+        return False
+
+
+async def collect_cards(page: Page, limit: int) -> List[Locator]:
+    cards: List[Locator] = []
+    seen_ids: set[str] = set()
+    max_candidates = max(limit * 3, 10)
 
     for selector in CARD_SELECTORS:
         try:
             locator = page.locator(selector)
-            count = await locator.count()
+            count = min(await locator.count(), max_candidates)
 
             if count > 0:
-                for index in range(min(count, limit * 2)):
-                    seen.append(locator.nth(index))
+                for index in range(count):
+                    await maybe_add_card(locator.nth(index), seen_ids, cards)
 
-                if seen:
-                    return seen
+                if len(cards) >= limit:
+                    return cards
         except Exception:
             continue
 
-    return seen
+    library_id_nodes = page.get_by_text(LIBRARY_ID_PATTERN)
+
+    try:
+        for index in range(min(await library_id_nodes.count(), max_candidates)):
+            node = library_id_nodes.nth(index)
+            candidates = [
+                node.locator("xpath=ancestor::div[contains(., 'See ad details')][1]").first,
+                node.locator("xpath=ancestor::div[contains(., 'Sponsored')][1]").first,
+                node.locator("xpath=ancestor::div[.//video][1]").first,
+                node.locator("xpath=ancestor::div[@role='article'][1]").first,
+                node.locator("xpath=ancestor::div[contains(., 'Library ID') and contains(., 'See ad details')][1]").first,
+            ]
+
+            for candidate in candidates:
+                if await maybe_add_card(candidate, seen_ids, cards):
+                    break
+
+            if len(cards) >= limit:
+                return cards
+    except Exception:
+        pass
+
+    return cards
 
 
 async def extract_headline(card) -> str:
@@ -169,16 +275,22 @@ async def extract_headline(card) -> str:
             if await locator.count() == 0:
                 continue
 
-            text = " ".join((await locator.all_inner_texts())[:1]).strip()
-            if len(text) >= 6:
-                return re.sub(r"\s+", " ", text)
+            for candidate in await locator.all_inner_texts():
+                text = normalize_text(candidate)
+                if len(text) >= 6 and not is_noise_text(text):
+                    return text
         except Exception:
             continue
 
     try:
         text = await card.inner_text()
-        lines = [line.strip() for line in text.splitlines() if len(line.strip()) >= 6]
-        return lines[0] if lines else ""
+        lines = [normalize_text(line) for line in text.splitlines() if len(normalize_text(line)) >= 6]
+
+        for line in lines:
+            if not is_noise_text(line):
+                return line
+
+        return ""
     except Exception:
         return ""
 
@@ -277,6 +389,9 @@ async def open_results_page(context: BrowserContext, target_url: str) -> Page:
     page._intercepted_video_urls = intercepted_video_urls  # type: ignore[attr-defined]
     await page.goto(target_url, wait_until="networkidle", timeout=30_000)
     await random_pause()
+    await page.wait_for_timeout(1_500)
+    await dismiss_overlays(page)
+    await handle_country_selector(page)
     await dismiss_overlays(page)
     await scroll_results(page)
     await dismiss_overlays(page)
