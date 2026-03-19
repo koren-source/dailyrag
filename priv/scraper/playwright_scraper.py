@@ -72,6 +72,10 @@ IGNORED_HEADLINE_TEXT = {
     "this ad has multiple versions",
 }
 
+_CSS_CLASS_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{3,15}(?:\s+[a-z][a-z0-9_-]{3,15}){2,}$")
+_CSS_PROP_PATTERN = re.compile(r"[a-zA-Z]+:[a-zA-Z]")
+_ATTR_PATTERN = re.compile(r"(?:aria-|data-|role=|xstyle)")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -126,12 +130,27 @@ def normalize_text(value: str) -> str:
 
 def is_noise_text(value: str) -> bool:
     normalized = normalize_text(value).lower()
-    return (
-        not normalized
-        or normalized in IGNORED_HEADLINE_TEXT
-        or normalized.startswith("library id:")
-        or normalized.startswith("started running on")
-    )
+
+    if not normalized:
+        return True
+
+    if normalized in IGNORED_HEADLINE_TEXT:
+        return True
+
+    if normalized.startswith("library id:") or normalized.startswith("started running on"):
+        return True
+
+    if _CSS_CLASS_PATTERN.match(normalized):
+        return True
+
+    if _CSS_PROP_PATTERN.search(normalized) or _ATTR_PATTERN.search(normalized):
+        return True
+
+    alpha_ratio = sum(1 for char in normalized if char.isalpha()) / max(len(normalized), 1)
+    if alpha_ratio < 0.5:
+        return True
+
+    return False
 
 
 async def random_pause(min_seconds: float = 0.5, max_seconds: float = 3.0) -> None:
@@ -295,6 +314,45 @@ async def extract_headline(card) -> str:
         return ""
 
 
+async def extract_body_text(card) -> str:
+    """Extract the main ad copy paragraph, distinct from the headline."""
+    candidates: List[str] = []
+
+    try:
+        locator = card.locator('div[dir="auto"]')
+        count = await locator.count()
+
+        for index in range(min(count, 20)):
+            try:
+                text = normalize_text(await locator.nth(index).inner_text())
+                if len(text) >= 20 and not is_noise_text(text):
+                    candidates.append(text)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if not candidates:
+        try:
+            locator = card.locator("span")
+            count = await locator.count()
+
+            for index in range(min(count, 30)):
+                try:
+                    text = normalize_text(await locator.nth(index).inner_text())
+                    if len(text) >= 20 and not is_noise_text(text):
+                        candidates.append(text)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    if not candidates:
+        return ""
+
+    return max(candidates, key=len)
+
+
 async def extract_video_url(card, intercepted_video_urls: List[str]) -> str:
     try:
         video = card.locator("video").first
@@ -329,6 +387,7 @@ async def parse_card(card, intercepted_video_urls: List[str]) -> Optional[Dict[s
             has_video = False
 
         headline = await extract_headline(card)
+        body_text = await extract_body_text(card)
         INTERSTITIAL_PHRASES = [
             "select country",
             "log in to facebook",
@@ -352,6 +411,7 @@ async def parse_card(card, intercepted_video_urls: List[str]) -> Optional[Dict[s
             "ad_id": ad_id,
             "format": "video" if has_video else "static_image",
             "headline": headline,
+            "body_text": body_text,
             "video_url": video_url,
             "start_date": start_date,
         }

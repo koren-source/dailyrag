@@ -121,16 +121,30 @@ defmodule DailyRag.Pipeline.Daily do
           "status" =>
             derive_status(
               format_errors(scrape_state.errors ++ segment_state.errors),
-              segment_state.segments_written
+              segment_state.segments_written,
+              scrape_state.new_ads_found
             )
         }
 
       if report["segments_written"] == 0 and not dry_run do
-        alert(
-          "⚠️ DailyRag ran on #{report["run_date"]} but wrote 0 segments. " <>
-            "Brands scraped: #{report["brands_scraped"]}. " <>
-            "Errors: #{if report["errors"] == "", do: "none", else: report["errors"]}"
-        )
+        cond do
+          report["new_ads_found"] == 0 ->
+            Logger.info(
+              "No new ads found across #{report["brands_scraped"]} brands — nothing to segment."
+            )
+
+          report["errors"] != "" ->
+            alert(
+              "🔴 DailyRag — #{report["run_date"]}: #{report["new_ads_found"]} new ads found but wrote 0 segments. " <>
+                "Errors: #{report["errors"]}"
+            )
+
+          true ->
+            alert(
+              "⚠️ DailyRag — #{report["run_date"]}: #{report["new_ads_found"]} new ads found but wrote 0 segments (no errors). " <>
+                "Check segmenter logs."
+            )
+        end
       end
 
       update_tracker(tracker, report)
@@ -540,6 +554,9 @@ defmodule DailyRag.Pipeline.Daily do
   defp status_header("success", report),
     do: "✅ DailyRag — #{report["run_date"]}"
 
+  defp status_header("no_new_ads", report),
+    do: "✅ DailyRag — #{report["run_date"]} — no new ads today"
+
   defp status_header("empty", report),
     do: "⚠️ DailyRag — #{report["run_date"]} — 0 segments written"
 
@@ -556,6 +573,16 @@ defmodule DailyRag.Pipeline.Daily do
     cond do
       errors != "" and segments_written > 0 -> "partial_failure"
       errors != "" and segments_written == 0 -> "failed"
+      segments_written == 0 -> "empty"
+      true -> "success"
+    end
+  end
+
+  defp derive_status(errors, segments_written, new_ads_found) do
+    cond do
+      errors != "" and segments_written > 0 -> "partial_failure"
+      errors != "" and segments_written == 0 -> "failed"
+      new_ads_found == 0 and segments_written == 0 -> "no_new_ads"
       segments_written == 0 -> "empty"
       true -> "success"
     end

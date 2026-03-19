@@ -123,6 +123,7 @@ defmodule DailyRag.Scraper do
       "ad_id" => ad |> get_value(["ad_id", :ad_id], "") |> to_string(),
       "format" => ad |> get_value(["format", :format], "static_image") |> to_string(),
       "headline" => ad |> get_value(["headline", :headline], "") |> to_string(),
+      "body_text" => ad |> get_value(["body_text", :body_text], "") |> to_string(),
       "video_url" => ad |> get_value(["video_url", :video_url], "") |> to_string(),
       "start_date" => ad |> get_value(["start_date", :start_date], "") |> to_string()
     }
@@ -151,16 +152,24 @@ defmodule DailyRag.Scraper do
   end
 
   defp headline_fallback(ad) do
+    body_text = ad |> get_value(["body_text", :body_text], "") |> to_string() |> String.trim()
     headline = ad |> get_value(["headline", :headline], "") |> to_string() |> String.trim()
 
-    if headline == "" do
-      ad
-      |> Map.put("copy", nil)
-      |> Map.put("copy_source", "copy_unavailable")
-    else
-      ad
-      |> Map.put("copy", headline)
-      |> Map.put("copy_source", "headline_fallback")
+    cond do
+      body_text != "" ->
+        ad
+        |> Map.put("copy", body_text)
+        |> Map.put("copy_source", "body_text_fallback")
+
+      headline != "" ->
+        ad
+        |> Map.put("copy", headline)
+        |> Map.put("copy_source", "headline_fallback")
+
+      true ->
+        ad
+        |> Map.put("copy", nil)
+        |> Map.put("copy_source", "copy_unavailable")
     end
   end
 
