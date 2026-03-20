@@ -494,10 +494,15 @@ defmodule DailyRag.Pipeline.Daily do
   defp confidence_for(start_date) do
     case Date.from_iso8601(start_date || "") do
       {:ok, date} ->
-        if Date.diff(Date.utc_today(), date) >= 60, do: "verified", else: "curated"
+        age = Date.diff(Date.utc_today(), date)
+        cond do
+          age >= 30 -> "verified"
+          age >= 14 -> "curated"
+          true -> "emerging"
+        end
 
       _ ->
-        "curated"
+        "emerging"
     end
   end
 
