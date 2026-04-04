@@ -30,8 +30,8 @@ env_file =
 env = Map.merge(env_file, System.get_env())
 
 config :dailyrag,
-  claude_bin: Map.get(env, "CLAUDE_BIN", "/opt/homebrew/bin/claude"),
-  claude_model: Map.get(env, "CLAUDE_MODEL", "claude-opus-4-6"),
+  anthropic_api_key: Map.get(env, "ANTHROPIC_API_KEY", ""),
+  claude_model: Map.get(env, "CLAUDE_MODEL", "claude-sonnet-4-6"),
   slack_bot_token: Map.get(env, "SLACK_BOT_TOKEN"),
   sheet_id: Map.get(env, "GOOGLE_SHEET_ID", "1nbVDvlICkkgzb-X678q6F2Y87ZiOV0B_xAobXtLsJd0"),
   slack_channel: Map.get(env, "SLACK_RAG_BUILDER_CHANNEL", "C0ALMSS92FK"),

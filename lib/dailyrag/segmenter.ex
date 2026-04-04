@@ -3,8 +3,7 @@ defmodule DailyRag.Segmenter do
 
   require Logger
 
-  @default_claude_bin "/opt/homebrew/bin/claude"
-  @default_model "claude-opus-4-6"
+  @default_model "claude-sonnet-4-6"
   @max_ads_per_run 20
   @retry_delays_ms [0, 2_000, 5_000, 10_000]
   @rate_limit_delay_ms 1_000
@@ -119,6 +118,11 @@ defmodule DailyRag.Segmenter do
         {:ok, text} ->
           {:halt, {:ok, text}}
 
+        {:error, reason} when reason in [:rate_limited, :overloaded] ->
+          Logger.warning("claude call failed (rate limited/overloaded): #{inspect(reason)}, sleeping 15s before retry")
+          sleep_fun().(15_000)
+          {:cont, {:error, reason}}
+
         {:error, reason} ->
           Logger.warning("claude call failed: #{inspect(reason)}")
           {:cont, {:error, reason}}
@@ -127,56 +131,44 @@ defmodule DailyRag.Segmenter do
   end
 
   defp call_claude(prompt) do
-    tmp =
-      Path.join(System.tmp_dir!(), "dr_prompt_#{:erlang.unique_integer([:positive])}.txt")
+    api_key = Application.get_env(:dailyrag, :anthropic_api_key, "")
 
-    try do
-      File.write!(tmp, prompt)
+    body = %{
+      model: model(),
+      max_tokens: 8192,
+      messages: [%{role: "user", content: prompt}]
+    }
 
-      task =
-        Task.async(fn ->
-          System.cmd("sh", ["-c", ~s|"#{claude_bin()}" --print --model "#{model()}" < "#{tmp}"|],
-            stderr_to_stdout: true
-          )
-        end)
+    task =
+      Task.async(fn ->
+        Req.post("https://api.anthropic.com/v1/messages",
+          json: body,
+          headers: [
+            {"x-api-key", api_key},
+            {"anthropic-version", "2023-06-01"}
+          ],
+          receive_timeout: @claude_timeout_ms
+        )
+      end)
 
-      case Task.yield(task, @claude_timeout_ms) || Task.shutdown(task, :brutal_kill) do
-        {:ok, {output, 0}} ->
-          trimmed = String.trim(output)
+    case Task.yield(task, @claude_timeout_ms + 5_000) || Task.shutdown(task, :brutal_kill) do
+      {:ok, {:ok, %{status: 200, body: %{"content" => [%{"text" => text} | _]}}}} ->
+        {:ok, String.trim(text)}
 
-          if String.starts_with?(trimmed, "{") or String.starts_with?(trimmed, "[") do
-            {:ok, trimmed}
-          else
-            # stderr may be mixed into stdout — scan from the bottom for the JSON payload
-            json_line =
-              output
-              |> String.split("\n")
-              |> Enum.reverse()
-              |> Enum.find(fn line ->
-                t = String.trim(line)
-                String.starts_with?(t, "{") or String.starts_with?(t, "[")
-              end)
+      {:ok, {:ok, %{status: 429}}} ->
+        {:error, :rate_limited}
 
-            case json_line do
-              nil ->
-                Logger.warning("call_claude: no JSON found in output (#{byte_size(output)} bytes, first 200: #{String.slice(output, 0, 200)})")
-                {:ok, trimmed}
+      {:ok, {:ok, %{status: 529}}} ->
+        {:error, :overloaded}
 
-              line ->
-                {:ok, String.trim(line)}
-            end
-          end
+      {:ok, {:ok, %{status: status, body: body}}} ->
+        {:error, {:api_error, status, inspect(body)}}
 
-        {:ok, {output, code}} ->
-          {:error, {:claude_exit, code, String.trim(output)}}
+      {:ok, {:error, reason}} ->
+        {:error, {:req_error, reason}}
 
-        nil ->
-          {:error, :claude_timeout}
-      end
-    rescue
-      e -> {:error, {:claude_exception, Exception.message(e)}}
-    after
-      File.rm(tmp)
+      nil ->
+        {:error, :claude_timeout}
     end
   end
 
@@ -392,9 +384,6 @@ defmodule DailyRag.Segmenter do
       "video_url" => get_value(ad, ["video_url", :video_url], "")
     }
   end
-
-  defp claude_bin,
-    do: Application.get_env(:dailyrag, :claude_bin, @default_claude_bin)
 
   defp model do
     Application.get_env(:dailyrag, :claude_model, @default_model)
